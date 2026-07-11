@@ -273,6 +273,15 @@ var state = {
   analysisResult: '',
   budget: 0,
   catBudgets: {},     // límites opcionales por categoría {comida_snacks: 80, ...}
+  // Apple Pay inbox (Fase 2) — repo privado de GitHub como buzón de pendientes
+  ghToken: '',
+  ghRepo: 'simeonsimon/finance-inbox',
+  cardMap: {},         // {nombre de tarjeta en Wallet: paymentId} — aprendido al confirmar
+  pending: [],         // [{name, sha, merchant, amount, card, date}]
+  pendingBusy: false,
+  pendingErr: '',
+  pendingConfirm: null, // {name, sha, card} del pendiente abierto en el modal
+  pendingAsk: null,     // name → pide confirmación antes de descartar
   balMode: 'mine',     // 'mine' (solo mi dinero) | 'all'
   // ahorro UI
   goalFormOpen: false,
@@ -324,6 +333,10 @@ function load() {
   state.budget  = lsGet('ft_budget', 0);
   var cb = lsGet('ft_catbudgets', {});
   state.catBudgets = (cb && typeof cb === 'object' && !Array.isArray(cb)) ? cb : {};
+  state.ghToken = String(lsGet('ft_ghtoken','') || '');
+  state.ghRepo  = String(lsGet('ft_ghrepo','simeonsimon/finance-inbox') || '');
+  var cmap = lsGet('ft_cardmap', {});
+  state.cardMap = (cmap && typeof cmap === 'object' && !Array.isArray(cmap)) ? cmap : {};
   state.balMode = lsGet('ft_balmode', 'mine');
   state.goals   = lsGet('ft_goals', []);
   var pays = lsGet('ft_payments', null);
@@ -345,6 +358,9 @@ function save() {
   lsSet('ft_apikey',   state.apiKey);
   lsSet('ft_budget',   state.budget);
   lsSet('ft_catbudgets', state.catBudgets);
+  lsSet('ft_ghtoken',  state.ghToken);
+  lsSet('ft_ghrepo',   state.ghRepo);
+  lsSet('ft_cardmap',  state.cardMap);
   lsSet('ft_balmode',  state.balMode);
   lsSet('ft_goals',    state.goals);
   lsSet('ft_payments', state.payments);
@@ -556,6 +572,139 @@ function detectRecurring() {
   return out;
 }
 
+// ── Apple Pay inbox (Fase 2) ───────────────────────────────────────────────
+// El Atajo de iOS guarda cada pago como JSON en pending/ de un repo privado.
+// Aquí se leen, se muestran como "Por confirmar" y se borran al confirmar.
+// La API de GitHub permite CORS desde el navegador, así que no hay servidor propio.
+function ghApi(path, opts) {
+  opts = opts || {};
+  var h = { 'Authorization':'Bearer '+state.ghToken, 'Accept':'application/vnd.github+json' };
+  var init = { method: opts.method || 'GET', headers: h };
+  if (opts.body) { h['Content-Type']='application/json'; init.body = JSON.stringify(opts.body); }
+  return fetch('https://api.github.com/repos/'+state.ghRepo+path, init);
+}
+function b64DecodeUtf8(s) {
+  try { return decodeURIComponent(escape(atob(String(s).replace(/\s/g,'')))); }
+  catch(e) { try { return atob(String(s).replace(/\s/g,'')); } catch(e2) { return ''; } }
+}
+// El Atajo puede mandar "24,50 €", "1.234,56" o un número — aceptar todo
+function parseAmountLenient(v) {
+  if (typeof v === 'number') return Math.abs(Math.round(v*100)/100);
+  var s = String(v||'').replace(/[^\d.,\-]/g,'');
+  if (!s) return 0;
+  if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g,'').replace(',', '.');
+  else s = s.replace(/,/g,'');
+  var n = parseFloat(s);
+  return isNaN(n) ? 0 : Math.abs(Math.round(n*100)/100);
+}
+function parsePendingDate(v) {
+  if (!v) return todayStr();
+  var s = String(v);
+  var m = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return m[1]+'-'+m[2]+'-'+m[3];
+  m = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/); // dd/mm/yyyy (España)
+  if (m) return m[3]+'-'+String(m[2]).padStart(2,'0')+'-'+String(m[1]).padStart(2,'0');
+  var d = new Date(s);
+  return isNaN(d.getTime()) ? todayStr() : isoOf(d);
+}
+// Wallet suele mandar el comercio EN MAYÚSCULAS
+function cleanMerchant(s) {
+  s = String(s).replace(/\s+/g,' ').trim();
+  if (s.length > 3 && s === s.toUpperCase()) {
+    s = s.toLowerCase().replace(/(^|\s)\S/g, function(c){ return c.toUpperCase(); });
+  }
+  return s.substring(0,40);
+}
+var pendingFetchedAt = 0;
+async function fetchPending(force) {
+  if (!state.ghToken || !state.ghRepo || state.pendingBusy) return;
+  if (!force && Date.now()-pendingFetchedAt < 30000) return;
+  state.pendingBusy = true; state.pendingErr = '';
+  try {
+    var res = await ghApi('/contents/pending');
+    if (res.status === 404) { state.pending = []; pendingFetchedAt = Date.now(); }
+    else if (!res.ok) throw new Error('HTTP '+res.status);
+    else {
+      var list = await res.json();
+      var files = (Array.isArray(list)?list:[]).filter(function(f){
+        return f.type==='file' && /^[\w.-]+\.json$/.test(f.name);
+      });
+      var items = [];
+      for (var i=0; i<files.length && i<20; i++) {
+        var fr = await ghApi('/contents/pending/'+encodeURIComponent(files[i].name));
+        if (!fr.ok) continue;
+        var fd = await fr.json();
+        var obj = {};
+        try { obj = JSON.parse(b64DecodeUtf8(fd.content||'')) || {}; } catch(e) {}
+        items.push({
+          name: files[i].name, sha: files[i].sha,
+          merchant: String(obj.merchant||obj.name||'Compra').substring(0,60),
+          amount: parseAmountLenient(obj.amount),
+          card: String(obj.card||'').substring(0,30),
+          date: parsePendingDate(obj.ts||obj.date)
+        });
+      }
+      items.sort(function(a,b){ return a.name<b.name ? 1 : -1; }); // más reciente arriba
+      state.pending = items;
+      pendingFetchedAt = Date.now();
+    }
+  } catch(e) {
+    state.pendingErr = e.message || 'error';
+  }
+  state.pendingBusy = false;
+  if (state.activeTab === 0) render();
+}
+async function deletePending(name, sha) {
+  state.pending = state.pending.filter(function(p){ return p.name !== name; });
+  try {
+    await ghApi('/contents/pending/'+encodeURIComponent(name), {
+      method:'DELETE', body:{ message:'procesado', sha:sha }
+    });
+  } catch(e) {}
+}
+function confirmPending(name) {
+  var it = state.pending.find(function(p){ return p.name === name; });
+  if (!it) return;
+  state.pendingConfirm = { name: it.name, sha: it.sha, card: it.card };
+  state.pendingAsk = null;
+  var payGuess = (it.card && state.cardMap[it.card] && PAYMENTS[state.cardMap[it.card]] && !PAYMENTS[state.cardMap[it.card]].hidden)
+    ? state.cardMap[it.card] : defaultPay();
+  openAddModal({
+    amount: it.amount > 0 ? it.amount.toFixed(2).replace('.',',') : '',
+    description: cleanMerchant(it.merchant),
+    date: it.date,
+    payment: payGuess
+  });
+}
+function askDismissPending(name) { state.pendingAsk = name; render(); }
+function dismissPending(name) {
+  var it = state.pending.find(function(p){ return p.name === name; });
+  state.pendingAsk = null;
+  if (it) deletePending(it.name, it.sha);
+  render();
+}
+function updateGhToken(v) { state.ghToken = String(v).trim(); lsSet('ft_ghtoken', state.ghToken); }
+function updateGhRepo(v) {
+  v = String(v).trim().replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'').replace(/\/+$/,'');
+  state.ghRepo = v || 'simeonsimon/finance-inbox';
+  lsSet('ft_ghrepo', state.ghRepo);
+}
+async function testGhConn() {
+  var st = document.getElementById('gh-status');
+  if (!state.ghToken) { if (st) st.textContent = 'Pega primero el token.'; return; }
+  if (st) st.textContent = 'Probando…';
+  try {
+    var r = await ghApi('/contents/pending');
+    if (r.status === 401 || r.status === 403) { if (st) st.textContent = '✗ Token no válido o sin permiso de Contents.'; return; }
+    if (r.status === 404) { if (st) st.textContent = '✗ No encuentro el repo o la carpeta pending/ — revisa el nombre.'; return; }
+    if (!r.ok) { if (st) st.textContent = '✗ Error HTTP '+r.status; return; }
+    var l = await r.json();
+    var n = (Array.isArray(l)?l:[]).filter(function(f){ return f.type==='file' && /\.json$/i.test(f.name); }).length;
+    if (st) st.textContent = '✓ Conectado — '+n+' pago(s) pendiente(s).';
+    fetchPending(true);
+  } catch(e) { if (st) st.textContent = '✗ Sin conexión: '+(e.message||e); }
+}
+
 // ── Anthropic API ──────────────────────────────────────────────────────────
 async function callClaude(prompt, maxTokens) {
   if (!state.apiKey) throw new Error('NO_KEY');
@@ -674,6 +823,7 @@ function closeModal() {
   document.getElementById('overlay').classList.remove('show');
   document.getElementById('fab').classList.remove('open');
   state.editingId = null;
+  state.pendingConfirm = null; // cerrar sin guardar deja el pendiente en la cola
 }
 function handleOverlayClick(e) {
   if (e.target === document.getElementById('overlay')) closeModal();
@@ -930,6 +1080,14 @@ async function submitEntry() {
     });
   }
   save();
+
+  // venía de la cola "Por confirmar" → recordar tarjeta→método y borrar del inbox
+  if (state.pendingConfirm) {
+    var pc = state.pendingConfirm;
+    state.pendingConfirm = null;
+    if (pc.card) { state.cardMap[pc.card] = state.modalPayment; lsSet('ft_cardmap', state.cardMap); }
+    deletePending(pc.name, pc.sha);
+  }
 
   modalSaving = false;
   btn.textContent = state.editingId ? 'Guardar cambios' : 'Guardar';
@@ -1199,6 +1357,42 @@ function renderDashboard() {
     ? '<div style="font-size:13px;color:#3a3a3a;margin-top:6px;cursor:pointer" onclick="setTab(2)">⬡ Ahorrado: <span style="color:#888;font-weight:600">'+fmtEur(savedTot)+'</span> <span style="color:#2a2a2a">· fuera del balance →</span></div>'
     : '';
 
+  // Cola "Por confirmar" (Apple Pay inbox)
+  var pendHtml='';
+  if (state.pending.length) {
+    var pRows = state.pending.map(function(p){
+      var sugg = localCatLookup(p.merchant);
+      var asking = state.pendingAsk === p.name;
+      return '<div style="padding:10px 0;border-bottom:1px solid #111">'+
+        '<div style="display:flex;justify-content:space-between;align-items:baseline">'+
+          '<div style="min-width:0;padding-right:10px">'+
+            '<div style="font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(cleanMerchant(p.merchant))+'</div>'+
+            '<div style="font-size:11px;color:#444;margin-top:2px">'+fmtDate(p.date)+(p.card?' · '+esc(p.card):'')+(sugg?' · '+esc(catShort(sugg))+' ✓':'')+'</div>'+
+          '</div>'+
+          '<div style="font-size:15px;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums">'+fmtEur(p.amount)+'</div>'+
+        '</div>'+
+        (asking
+          ? '<div style="display:flex;gap:8px;margin-top:8px">'+
+              '<button class="chip chip-sm on" onclick="dismissPending(\''+p.name+'\')">Sí, descartar</button>'+
+              '<button class="chip chip-sm" onclick="state.pendingAsk=null;render()">Cancelar</button>'+
+            '</div>'
+          : '<div style="display:flex;gap:8px;margin-top:8px">'+
+              '<button class="chip chip-sm on" onclick="confirmPending(\''+p.name+'\')">+ Añadir</button>'+
+              '<button class="chip chip-sm" onclick="askDismissPending(\''+p.name+'\')">Descartar</button>'+
+            '</div>')+
+        '</div>';
+    }).join('');
+    pendHtml='<div style="padding:16px 20px 0">'+
+      '<div class="card anim-in" style="border-color:#262626">'+
+        '<div style="display:flex;justify-content:space-between;align-items:center">'+
+          '<div style="font-size:13px;font-weight:700">Por confirmar · '+state.pending.length+'</div>'+
+          '<button onclick="fetchPending(true)" style="background:none;border:none;color:#555;font-size:15px;cursor:pointer;padding:2px 6px">'+(state.pendingBusy?'…':'↻')+'</button>'+
+        '</div>'+
+        '<div style="font-size:11px;color:#444;margin:2px 0 2px">Pagos Apple Pay recibidos del Atajo</div>'+
+        pRows+
+      '</div></div>';
+  }
+
   var recent = entriesSorted().slice(0,8);
   var rows = recent.length===0
     ? '<div style="text-align:center;padding:52px 0"><div style="font-size:36px;opacity:.12;margin-bottom:12px">◻</div><div style="font-size:15px;color:#2e2e2e;font-weight:500">Sin transacciones</div><div style="font-size:13px;color:#222;margin-top:5px">Pulsa + para empezar</div></div>'
@@ -1220,6 +1414,7 @@ function renderDashboard() {
       '</div>'+
       savedHtml+
     '</div>'+
+    pendHtml+
     '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:#111;border-bottom:1px solid #111">'+
       dashCard('Ingresos',fmtEur(mInc),'este mes')+
       dashCard('Gastos',fmtEur(mExp),'este mes')+
@@ -1968,6 +2163,16 @@ function renderExport() {
       (state.apiKey?'<div style="font-size:11px;color:#3a3a3a;margin-top:7px">✓ Configurada · guardada localmente</div>':'')+
     '</div>'+
 
+    // Apple Pay inbox
+    '<div class="card">'+
+      '<div style="font-size:13px;font-weight:700;margin-bottom:4px">Apple Pay automático</div>'+
+      '<div style="font-size:12px;color:#444;line-height:1.5;margin-bottom:10px">El Atajo del iPhone guarda cada pago en tu repo privado de GitHub y aparece en Inicio como «Por confirmar». Pega aquí un token <b style="color:#777">fine-grained</b> con acceso solo a ese repo (Contents: read/write). No se incluye en las copias de seguridad.</div>'+
+      '<input type="password" id="ghtoken-input" class="input-field" placeholder="github_pat_…" value="'+esc(state.ghToken)+'" oninput="updateGhToken(this.value)" style="margin-bottom:8px">'+
+      '<input type="text" id="ghrepo-input" class="input-field" placeholder="usuario/repo" value="'+esc(state.ghRepo)+'" onchange="updateGhRepo(this.value);render()" style="margin-bottom:8px;font-size:13px">'+
+      '<button class="chip chip-sm" onclick="testGhConn()">Probar conexión</button>'+
+      '<div id="gh-status" style="font-size:11px;color:#555;min-height:14px;margin-top:8px">'+(state.ghToken?'✓ Token guardado localmente':'')+'</div>'+
+    '</div>'+
+
     // Budget
     '<div class="card">'+
       '<div style="font-size:13px;font-weight:700;margin-bottom:4px">Presupuesto mensual</div>'+
@@ -2032,7 +2237,7 @@ function renderExport() {
       '<button id="clear-btn" onclick="doClear()" style="width:100%;padding:12px;background:#0d0d0d;color:#2a2a2a;border:1px solid #1c1c1c;border-radius:8px;font-size:14px;font-weight:600;cursor:default;min-height:44px">Borrar todo</button>'+
     '</div>'+
 
-    '<div style="text-align:center;font-size:11px;color:#222;margin-top:6px">v3.1 · límites por categoría, recurrentes, comparativa y fechas límite</div>'+
+    '<div style="text-align:center;font-size:11px;color:#222;margin-top:6px">v3.2 · Apple Pay «Por confirmar» + insights v3.1</div>'+
 
     '</div></div>';
 }
@@ -2105,7 +2310,8 @@ function exportCsv() {
   downloadBlob(csv,'text/csv;charset=utf-8','finanzas_'+todayStr()+'.csv');
 }
 function exportJson() {
-  downloadBlob(JSON.stringify({entries:state.entries,budget:state.budget,catBudgets:state.catBudgets,goals:state.goals,payments:state.payments},null,1),
+  // ghToken se excluye a propósito: nunca guardar credenciales en el backup
+  downloadBlob(JSON.stringify({entries:state.entries,budget:state.budget,catBudgets:state.catBudgets,goals:state.goals,payments:state.payments,cardMap:state.cardMap,ghRepo:state.ghRepo},null,1),
     'application/json','finanzas_backup_'+todayStr()+'.json');
 }
 function doRestore() {
@@ -2141,6 +2347,11 @@ function doRestore() {
       });
       state.catBudgets=cb;
     }
+    if (!Array.isArray(data) && data.cardMap && typeof data.cardMap==='object' && !Array.isArray(data.cardMap)) {
+      state.cardMap={};
+      Object.keys(data.cardMap).forEach(function(k){ state.cardMap[String(k)]=String(data.cardMap[k]); });
+    }
+    if (!Array.isArray(data) && typeof data.ghRepo==='string' && data.ghRepo.indexOf('/')>0) state.ghRepo=data.ghRepo;
     var clean=ents.filter(function(e){ return e && e.description && e.amount>0 && e.date; })
       .map(function(e){
         var out={ id:e.id||uid(), type:e.type==='income'?'income':'expense',
@@ -2305,6 +2516,9 @@ function parseUrlParams() {
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 load(); render(); parseUrlParams();
+fetchPending();
+// PWA en iPhone: al volver a la app, buscar pagos nuevos (throttle de 30s dentro)
+document.addEventListener('visibilitychange', function(){ if (!document.hidden) fetchPending(); });
 </script>
 </body>
 </html>
