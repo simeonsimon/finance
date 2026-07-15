@@ -453,6 +453,9 @@ var CAT_SHORT = {
 function catLabel(c) { return CAT_LABELS[c] || c; }
 function catShort(c) { return CAT_SHORT[c] || c; }
 
+// ── Módulo: inferencia local de categoría ──────────────────────────────────
+// Autocontenido: solo depende de norm(). Expone únicamente localCatLookup.
+var CatInfer = (function(){
 // Merchant map — tuned for a teen in Canarias. Keys must be pre-normalized (no accents, lowercase).
 var MERCHANT_MAP = (function(){
   var m = {};
@@ -532,8 +535,14 @@ function localCatLookup(description) {
   if (/deporte|entren|partido|gimnas|natacion|baloncesto|tenis|hobby/.test(d)) return 'deporte_hobbies';
   return null;
 }
+return { localCatLookup: localCatLookup };
+})();
+var localCatLookup = CatInfer.localCatLookup;
 
-// ── Pagos recurrentes (detección local, sin IA) ────────────────────────────
+// ── Módulo: pagos recurrentes (detección local, sin IA) ────────────────────
+// "Desviación sobre línea base personal": agrupa por comercio y detecta
+// cargos ~mensuales de importe similar. Expone únicamente detectRecurring.
+var Recurring = (function(){
 function recKey(desc) {
   return norm(desc).replace(/\d+/g,' ').replace(/[^a-z ]/g,' ').replace(/\s+/g,' ').trim();
 }
@@ -571,11 +580,16 @@ function detectRecurring() {
   out.sort(function(a,b){ return b.monthly - a.monthly; });
   return out;
 }
+return { detectRecurring: detectRecurring };
+})();
+var detectRecurring = Recurring.detectRecurring;
 
-// ── Apple Pay inbox (Fase 2) ───────────────────────────────────────────────
+// ── Módulo: Apple Pay inbox — sync con GitHub (Fase 2) ─────────────────────
 // El Atajo de iOS guarda cada pago como JSON en pending/ de un repo privado.
 // Aquí se leen, se muestran como "Por confirmar" y se borran al confirmar.
 // La API de GitHub permite CORS desde el navegador, así que no hay servidor propio.
+// Lee/escribe state.* y llama a render()/openAddModal() (globales) al terminar.
+var GhInbox = (function(){
 function ghApi(path, opts) {
   opts = opts || {};
   var h = { 'Authorization':'Bearer '+state.ghToken, 'Accept':'application/vnd.github+json' };
@@ -704,8 +718,22 @@ async function testGhConn() {
     fetchPending(true);
   } catch(e) { if (st) st.textContent = '✗ Sin conexión: '+(e.message||e); }
 }
+return {
+  fetchPending: fetchPending, deletePending: deletePending,
+  confirmPending: confirmPending, askDismissPending: askDismissPending,
+  dismissPending: dismissPending, cleanMerchant: cleanMerchant,
+  updateGhToken: updateGhToken, updateGhRepo: updateGhRepo, testGhConn: testGhConn
+};
+})();
+// alias globales — los onclick del HTML y el resto del código los usan por nombre
+var fetchPending = GhInbox.fetchPending, deletePending = GhInbox.deletePending,
+    confirmPending = GhInbox.confirmPending, askDismissPending = GhInbox.askDismissPending,
+    dismissPending = GhInbox.dismissPending, cleanMerchant = GhInbox.cleanMerchant,
+    updateGhToken = GhInbox.updateGhToken, updateGhRepo = GhInbox.updateGhRepo,
+    testGhConn = GhInbox.testGhConn;
 
-// ── Anthropic API ──────────────────────────────────────────────────────────
+// ── Módulo: Anthropic API (IA para clasificar y analizar) ──────────────────
+var ClaudeAI = (function(){
 async function callClaude(prompt, maxTokens) {
   if (!state.apiKey) throw new Error('NO_KEY');
   var res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -758,6 +786,9 @@ async function inferCategory(description, type) {
     return EXP_CATS.indexOf(r2) !== -1 ? r2 : 'otros';
   } catch(e) { return 'otros'; }
 }
+return { callClaude: callClaude, inferCategory: inferCategory };
+})();
+var callClaude = ClaudeAI.callClaude, inferCategory = ClaudeAI.inferCategory;
 
 // ── Tab navigation ─────────────────────────────────────────────────────────
 function setTab(i) {
@@ -1098,7 +1129,9 @@ async function submitEntry() {
   render();
 }
 
-// ── Visual builders ────────────────────────────────────────────────────────
+// ── Módulo: visual builders (SVG puro, sin estado) ─────────────────────────
+// Datos dentro → string SVG fuera. Solo usan helpers de fecha globales.
+var Charts = (function(){
 function buildDonut(segments, size) {
   if (!segments || !segments.length) return '';
   size = size || 140;
@@ -1193,6 +1226,10 @@ function buildBalanceChart(ents) {
     '<circle cx="'+lastX+'" cy="'+lastY+'" r="3" fill="#fff"/>'+
     '</svg>';
 }
+return { buildDonut: buildDonut, buildTrendChart: buildTrendChart, buildBalanceChart: buildBalanceChart };
+})();
+var buildDonut = Charts.buildDonut, buildTrendChart = Charts.buildTrendChart,
+    buildBalanceChart = Charts.buildBalanceChart;
 
 function animateNum(el, from, to) {
   var start = null, dur = 550;
