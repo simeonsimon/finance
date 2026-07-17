@@ -292,16 +292,18 @@ var state = {
   // modal state
   editingId: null,
   modalCat: 'auto',
-  modalPayment: 'card2',
-  modalDate: ''
+  modalPayment: null,
+  modalDate: '',
+  // onboarding (primera vez)
+  onboarded: false,
+  needsOnboarding: false,
+  onboardStep: 0,
+  onboardData: { payments: [], income: 0, saved: 0, goals: [] }
 };
 
 // ── Payments (personalizables) ─────────────────────────────────────────────
-var DEFAULT_PAYMENTS = [
-  { id:'card2', label:'Mi Tarjeta',  short:'Mi tarj.', icon:'▦', mine:true,  hidden:false },
-  { id:'cash',  label:'Efectivo',    short:'Efectivo', icon:'◇', mine:true,  hidden:false },
-  { id:'card1', label:'Tarjeta Tía', short:'T. Tía',   icon:'▤', mine:false, hidden:false }
-];
+// Sin métodos por defecto — el usuario los define en el cuestionario inicial.
+var DEFAULT_PAYMENTS = [];
 var PAYMENTS = {}, PAY_IDS = [];
 function rebuildPayLookup() {
   PAYMENTS = {};
@@ -315,7 +317,7 @@ function payInfo(id) {
 function defaultPay() {
   var m = state.payments.filter(function(p){ return !p.hidden && p.mine; })[0] ||
           state.payments.filter(function(p){ return !p.hidden; })[0];
-  return m ? m.id : 'card2';
+  return m ? m.id : (state.payments[0] ? state.payments[0].id : null);
 }
 
 // ── Storage ────────────────────────────────────────────────────────────────
@@ -340,16 +342,18 @@ function load() {
   state.balMode = lsGet('ft_balmode', 'mine');
   state.goals   = lsGet('ft_goals', []);
   var pays = lsGet('ft_payments', null);
-  state.payments = (Array.isArray(pays) && pays.length)
-    ? pays
-    : JSON.parse(JSON.stringify(DEFAULT_PAYMENTS));
+  var hasStoredPayments = Array.isArray(pays) && pays.length;
+  state.payments = hasStoredPayments ? pays : JSON.parse(JSON.stringify(DEFAULT_PAYMENTS));
+  state.onboarded = !!lsGet('ft_onboarded', false);
+  // solo se muestra a quien nunca ha guardado métodos de pago propios
+  state.needsOnboarding = !state.onboarded && !hasStoredPayments;
   rebuildPayLookup();
   state.modalPayment = defaultPay();
   // migrate old entries: english categories + missing payment
   var changed = false;
   state.entries.forEach(function(e){
     if (LEGACY_CATS[e.category]) { e.category = LEGACY_CATS[e.category]; changed = true; }
-    if (!e.payment) { e.payment = 'card2'; changed = true; }
+    if (!e.payment) { e.payment = defaultPay(); changed = true; }
   });
   if (changed) save();
 }
@@ -364,6 +368,7 @@ function save() {
   lsSet('ft_balmode',  state.balMode);
   lsSet('ft_goals',    state.goals);
   lsSet('ft_payments', state.payments);
+  lsSet('ft_onboarded', state.onboarded);
 }
 
 // ── Date helpers ───────────────────────────────────────────────────────────
@@ -1247,6 +1252,15 @@ function animateNum(el, from, to) {
 // ── Render ─────────────────────────────────────────────────────────────────
 function render() {
   var el = document.getElementById('content');
+  var tabbar = document.getElementById('tabbar'), fab = document.getElementById('fab');
+  if (state.needsOnboarding) {
+    if (tabbar) tabbar.style.display = 'none';
+    if (fab) fab.style.display = 'none';
+    el.innerHTML = renderOnboarding();
+    return;
+  }
+  if (tabbar) tabbar.style.display = '';
+  if (fab) fab.style.display = '';
   var t  = state.activeTab;
   if      (t===0) el.innerHTML = renderDashboard();
   else if (t===1) el.innerHTML = renderTransactions();
@@ -2122,7 +2136,7 @@ function renderPayManager() {
   }).join('');
   return '<div class="card">'+
     '<div style="font-size:13px;font-weight:700;margin-bottom:4px">Métodos de pago</div>'+
-    '<div style="font-size:12px;color:#444;line-height:1.5;margin-bottom:12px">Renombra, añade u oculta métodos. <b style="color:#777">Mío</b> = cuenta en tu balance «Mi dinero» (desactívalo para dinero de otros, como la Tarjeta Tía). Ocultar no borra los movimientos antiguos.</div>'+
+    '<div style="font-size:12px;color:#444;line-height:1.5;margin-bottom:12px">Renombra, añade u oculta métodos. <b style="color:#777">Mío</b> = cuenta en tu balance «Mi dinero» (desactívalo para dinero que gestionas para otra persona). Ocultar no borra los movimientos antiguos.</div>'+
     rows+
     '<div id="paymgr-status" style="font-size:11px;color:#555;min-height:14px;margin:2px 0 6px"></div>'+
     '<div style="display:flex;gap:8px">'+
@@ -2534,6 +2548,198 @@ function attachListeners(tab) {
       });
     }
   }
+}
+
+// ── Onboarding (cuestionario inicial) ───────────────────────────────────────
+var ONBOARD_TOTAL = 5; // 0 bienvenida · 1 pagos · 2 ingresos · 3 ahorro actual · 4 objetivos
+function onboardHeader(title, subtitle) {
+  return '<div style="font-size:26px;font-weight:800;letter-spacing:-.8px;margin-bottom:10px">'+esc(title)+'</div>'+
+    '<div style="font-size:14px;color:#666;line-height:1.55;margin-bottom:26px">'+esc(subtitle)+'</div>';
+}
+function onboardFooter(canContinue, label) {
+  return '<div style="display:flex;gap:10px;margin-top:8px">'+
+    '<button class="btn-secondary pressable" style="width:52px;flex-shrink:0" onclick="onboardBack()">←</button>'+
+    '<button class="pressable" onclick="onboardNext()" style="flex:1;padding:16px;background:'+(canContinue?'#fff':'#141414')+';color:'+(canContinue?'#000':'#2a2a2a')+';border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:'+(canContinue?'pointer':'default')+';min-height:54px">'+esc(label)+'</button>'+
+  '</div>';
+}
+function renderOnboarding() {
+  var step = state.onboardStep;
+  var dots = '';
+  for (var i=1;i<ONBOARD_TOTAL;i++) {
+    dots += '<div style="flex:1;height:3px;border-radius:2px;background:'+(i<=step?'#fff':'#1c1c1c')+';transition:background .3s"></div>';
+  }
+  var body = '';
+  if      (step===0) body = onboardWelcome();
+  else if (step===1) body = onboardPayments();
+  else if (step===2) body = onboardIncome();
+  else if (step===3) body = onboardSaved();
+  else if (step===4) body = onboardGoals();
+  return '<div class="anim-in" style="min-height:100vh;display:flex;flex-direction:column;padding:52px 20px 32px">'+
+    (step>0 ? '<div style="display:flex;gap:6px;margin-bottom:32px">'+dots+'</div>' : '')+
+    '<div style="flex:1">'+body+'</div>'+
+    '</div>';
+}
+function onboardWelcome() {
+  return '<div style="display:flex;flex-direction:column;justify-content:center;min-height:76vh">'+
+    '<div style="font-size:38px;margin-bottom:18px">👋</div>'+
+    '<div style="font-size:29px;font-weight:800;letter-spacing:-1px;line-height:1.18;margin-bottom:14px">Vamos a personalizar tu app</div>'+
+    '<div style="font-size:15px;color:#777;line-height:1.6;margin-bottom:36px">Un par de preguntas rápidas — tus métodos de pago, ingresos y objetivos de ahorro. Menos de un minuto, y puedes cambiarlo todo luego en Ajustes.</div>'+
+    '<button class="btn-primary pressable" onclick="onboardNext()">Empezar</button>'+
+    '<button class="pressable" onclick="onboardSkipAll()" style="margin-top:14px;background:none;border:none;color:#444;font-size:13px;cursor:pointer;padding:10px">Configurar más tarde</button>'+
+  '</div>';
+}
+function onboardPaymentRows() {
+  return state.onboardData.payments.map(function(p,i){
+    return '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">'+
+      '<span style="flex:1;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(p.label)+'</span>'+
+      '<button class="chip chip-sm'+(p.mine?' on':'')+'" style="flex-shrink:0" onclick="onboardTogglePayMine('+i+')">'+(p.mine?'Mío':'No es mío')+'</button>'+
+      '<button class="btn-secondary pressable" style="width:34px;padding:0;min-height:34px;color:#666;flex-shrink:0" onclick="onboardRemovePayment('+i+')">×</button>'+
+    '</div>';
+  }).join('');
+}
+function onboardPayments() {
+  var list = state.onboardData.payments;
+  var suggIcons = {Efectivo:'◇',Tarjeta:'▦',Bizum:'◈'};
+  var suggestions = Object.keys(suggIcons).filter(function(s){
+    return !list.some(function(p){ return norm(p.label)===norm(s); });
+  }).map(function(s){
+    return '<button class="chip chip-sm pressable" onclick="onboardAddPaymentQuick(\''+s+'\')">+ '+s+'</button>';
+  }).join('');
+  return onboardHeader('¿Cómo pagas?','Añade tus métodos de pago. Marca cuáles son dinero tuyo — así la app separa lo tuyo de lo que gestionas para otra persona.')+
+    (list.length ? '<div style="margin-bottom:14px">'+onboardPaymentRows()+'</div>' : '')+
+    (suggestions ? '<div class="chips" style="margin-bottom:14px">'+suggestions+'</div>' : '')+
+    '<div style="display:flex;gap:8px;margin-bottom:8px">'+
+      '<input id="onb-pay-name" class="input-field" placeholder="Otro — ej: Cuenta banco" style="flex:1" onkeydown="if(event.key===\'Enter\')onboardAddPaymentCustom()">'+
+      '<button class="chip pressable" style="flex-shrink:0" onclick="onboardAddPaymentCustom()">+ Añadir</button>'+
+    '</div>'+
+    '<div id="onb-pay-status" style="font-size:12px;color:#555;min-height:16px;margin-bottom:18px"></div>'+
+    onboardFooter(list.length>0,'Continuar');
+}
+function onboardAddPaymentQuick(label) {
+  var icons = {Efectivo:'◇',Tarjeta:'▦',Bizum:'◈'};
+  state.onboardData.payments.push({ id:'pm'+uid(), label:label, short:label.substring(0,9), icon:icons[label]||'▪', mine:true, hidden:false });
+  render();
+}
+function onboardAddPaymentCustom() {
+  var el = document.getElementById('onb-pay-name');
+  var v = (el?el.value:'').trim();
+  if (!v) { var st=document.getElementById('onb-pay-status'); if(st) st.textContent='Escribe un nombre.'; return; }
+  state.onboardData.payments.push({ id:'pm'+uid(), label:v.substring(0,20), short:v.substring(0,9), icon:'▪', mine:true, hidden:false });
+  render();
+}
+function onboardRemovePayment(i) { state.onboardData.payments.splice(i,1); render(); }
+function onboardTogglePayMine(i) { state.onboardData.payments[i].mine = !state.onboardData.payments[i].mine; render(); }
+function onboardMoneyStep(title, subtitle, inputId, val) {
+  return onboardHeader(title, subtitle)+
+    '<div style="position:relative;margin-bottom:24px">'+
+      '<span style="position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:26px;color:#333;font-weight:700;pointer-events:none">€</span>'+
+      '<input id="'+inputId+'" type="text" inputmode="decimal" placeholder="0,00" value="'+(val>0?String(val).replace('.',','):'')+'"'+
+      ' style="width:100%;background:#111;border:1px solid #1c1c1c;border-radius:12px;padding:16px 14px 16px 44px;color:#fff;font-size:32px;font-weight:800;outline:none;letter-spacing:-1.5px"'+
+      ' onkeydown="if(event.key===\'Enter\')onboardNext()">'+
+    '</div>'+
+    '<div style="font-size:12px;color:#3a3a3a;margin:-14px 0 20px">Opcional — déjalo en blanco para saltarlo</div>'+
+    onboardFooter(true,'Continuar');
+}
+function onboardIncome() {
+  return onboardMoneyStep('¿Cuánto ingresas al mes?','Aproximado — pagas, propinas, lo que te den. Puedes ajustarlo luego.','onb-income-input', state.onboardData.income);
+}
+function onboardSaved() {
+  return onboardMoneyStep('¿Cuánto dinero tienes ahora?','Lo que ya tienes ahorrado o disponible — así tu balance empieza en el número real, no en cero.','onb-saved-input', state.onboardData.saved);
+}
+function onboardGoals() {
+  var goals = state.onboardData.goals;
+  var rows = goals.map(function(g,i){
+    return '<div class="card" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding:12px 14px">'+
+      '<div style="min-width:0"><div style="font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(g.name)+'</div>'+
+      (g.target>0?'<div style="font-size:12px;color:#555;margin-top:2px">Meta: '+fmtEur(g.target)+'</div>':'')+'</div>'+
+      '<button class="btn-secondary pressable" style="width:34px;padding:0;min-height:34px;color:#666;flex-shrink:0" onclick="onboardRemoveGoal('+i+')">×</button>'+
+    '</div>';
+  }).join('');
+  return onboardHeader('¿Algún objetivo de ahorro?','Un viaje, un móvil nuevo… opcional, puedes añadir varios o ninguno.')+
+    (rows ? '<div style="margin-bottom:12px">'+rows+'</div>' : '')+
+    '<div class="card" style="margin-bottom:20px">'+
+      '<input id="onb-goal-name" class="input-field" placeholder="Nombre — ej: Viaje, Portátil…" style="margin-bottom:8px">'+
+      '<div style="position:relative;margin-bottom:10px">'+
+        '<span style="position:absolute;left:13px;top:50%;transform:translateY(-50%);font-size:16px;color:#444;pointer-events:none">€</span>'+
+        '<input id="onb-goal-target" class="input-field" type="text" inputmode="decimal" placeholder="Meta (opcional)" style="padding-left:30px" onkeydown="if(event.key===\'Enter\')onboardAddGoal()">'+
+      '</div>'+
+      '<button class="chip pressable" onclick="onboardAddGoal()">+ Añadir objetivo</button>'+
+    '</div>'+
+    onboardFooter(true,'Terminar');
+}
+function onboardAddGoal() {
+  var n=document.getElementById('onb-goal-name'), t=document.getElementById('onb-goal-target');
+  var name=(n?n.value:'').trim();
+  if (!name) return;
+  var target=t?parseFloat(sanitizeAmt(t.value)):NaN;
+  state.onboardData.goals.push({ name:name.substring(0,30), target:(!isNaN(target)&&target>0)?Math.round(target*100)/100:0 });
+  render();
+}
+function onboardRemoveGoal(i) { state.onboardData.goals.splice(i,1); render(); }
+function onboardBack() {
+  if (state.onboardStep<=0) return;
+  state.onboardStep--;
+  render();
+}
+function onboardNext() {
+  var step = state.onboardStep;
+  if (step===1 && !state.onboardData.payments.length) {
+    var st=document.getElementById('onb-pay-status');
+    if (st) st.textContent='Añade al menos un método de pago para continuar.';
+    return;
+  }
+  if (step===2) {
+    var inc=document.getElementById('onb-income-input');
+    var n=inc?parseFloat(sanitizeAmt(inc.value)):NaN;
+    state.onboardData.income=(!isNaN(n)&&n>0)?n:0;
+  }
+  if (step===3) {
+    var sv=document.getElementById('onb-saved-input');
+    var n2=sv?parseFloat(sanitizeAmt(sv.value)):NaN;
+    state.onboardData.saved=(!isNaN(n2)&&n2>=0)?n2:0;
+  }
+  if (step===4) { onboardFinish(); return; }
+  state.onboardStep++;
+  render();
+}
+function onboardSkipAll() {
+  state.onboardData = { payments: [], income: 0, saved: 0, goals: [] };
+  onboardFinish();
+}
+function onboardFinish() {
+  state.payments = state.onboardData.payments.length
+    ? state.onboardData.payments
+    : [{ id:'pm'+uid(), label:'Efectivo', short:'Efectivo', icon:'◇', mine:true, hidden:false }];
+  rebuildPayLookup();
+  state.modalPayment = defaultPay();
+
+  if (state.onboardData.income > 0) {
+    state.entries.unshift({
+      id: uid(), type:'income', amount: state.onboardData.income,
+      description:'Ingreso mensual', category:'salario',
+      payment: defaultPay(), date: todayStr()
+    });
+  }
+  if (state.onboardData.saved > 0) {
+    var diff = Math.round((state.onboardData.saved - currentMineBalance())*100)/100;
+    if (Math.abs(diff) >= 0.005) {
+      state.entries.unshift({
+        id: uid(), type: diff>0?'income':'expense', amount: Math.abs(diff),
+        description:'Ajuste de saldo', category:'ajuste',
+        payment: defaultPay(), date: todayStr()
+      });
+    }
+  }
+  state.onboardData.goals.forEach(function(g){
+    state.goals.push({ id: uid(), name: g.name, target: g.target });
+  });
+
+  state.onboarded = true;
+  state.needsOnboarding = false;
+  state.onboardStep = 0;
+  save();
+  state.activeTab = 0;
+  render();
 }
 
 // ── URL params (Apple Pay Shortcut) ────────────────────────────────────────
