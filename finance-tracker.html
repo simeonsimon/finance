@@ -298,9 +298,9 @@ var state = {
 
 // ── Payments (personalizables) ─────────────────────────────────────────────
 var DEFAULT_PAYMENTS = [
-  { id:'card1', label:'Tarjeta Tía', short:'T. Tía',   icon:'▤', mine:false, hidden:false },
   { id:'card2', label:'Mi Tarjeta',  short:'Mi tarj.', icon:'▦', mine:true,  hidden:false },
-  { id:'cash',  label:'Efectivo',    short:'Efectivo', icon:'◇', mine:true,  hidden:false }
+  { id:'cash',  label:'Efectivo',    short:'Efectivo', icon:'◇', mine:true,  hidden:false },
+  { id:'card1', label:'Tarjeta Tía', short:'T. Tía',   icon:'▤', mine:false, hidden:false }
 ];
 var PAYMENTS = {}, PAY_IDS = [];
 function rebuildPayLookup() {
