@@ -25,6 +25,13 @@ input,textarea,button{font-family:inherit}
 @keyframes riseY{from{transform:scaleY(0)}to{transform:scaleY(1)}}
 @keyframes drawLine{from{stroke-dashoffset:600}to{stroke-dashoffset:0}}
 @keyframes popIn{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
+/* Respeta "Reducir movimiento" de iOS: todo llega a su estado final al
+   instante (las animaciones son 'both', así que el contenido queda visible) */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important;scroll-behavior:auto!important}
+}
 .anim-in{animation:fadeUp .35s ease both}
 .row-in{animation:fadeUp .3s ease both}
 .pressable{transition:transform .12s ease}
@@ -74,6 +81,22 @@ input,textarea,button{font-family:inherit}
 /* Common */
 .section-label{font-size:10px;color:#555;letter-spacing:.12em;text-transform:uppercase}
 .card{background:#090909;border:1px solid #181818;border-radius:12px;padding:16px}
+
+/* Tarjetas de saldo por método (Inicio) */
+.paygrid{display:grid;gap:1px;background:#141414;border:1px solid #141414;border-radius:12px;overflow:hidden}
+.paycard{background:#000;border:none;padding:13px 11px 12px;text-align:left;color:#fff;cursor:pointer;
+  display:block;width:100%;min-height:84px;transition:background .15s ease}
+.paycard:active{background:#0c0c0c}
+.paycard:focus-visible{outline:2px solid #fff;outline-offset:-2px}
+.paycard-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}
+.paycard-ico{font-size:14px;opacity:.55}
+.paycard-go{font-size:12px;color:#3a3a3a}
+.paycard-val{font-size:15px;font-weight:700;letter-spacing:-.4px;font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.paycard-name{font-size:9.5px;color:#777;margin-top:3px;letter-spacing:.05em;text-transform:uppercase;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.paycard-sub{font-size:10px;color:#5a5a5a;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.paycard-neg .paycard-val{color:#9a9a9a}
 .input-field{width:100%;background:#111;border:1px solid #1c1c1c;border-radius:8px;padding:12px 14px;color:#fff;font-size:14px;outline:none}
 .input-field::placeholder{color:#333}
 textarea.input-field{resize:none;line-height:1.55}
@@ -249,6 +272,11 @@ details.card[open] summary::after{content:'−'}
     <div class="sheet" id="adj-sheet"></div>
   </div>
 
+  <!-- Mover dinero entre métodos (traspaso) -->
+  <div id="mov-overlay" class="sheet-overlay no-print" onclick="if(event.target===this)closeMove()">
+    <div class="sheet" id="mov-sheet"></div>
+  </div>
+
   <div class="print-only" id="print-view"></div>
 </div>
 
@@ -288,7 +316,13 @@ var state = {
   goalAction: null,    // {goalId, mode:'add'|'take', pay}
   goalEdit: null,
   goalDeleteAsk: null,
-  adjustPay: null,
+  adjustPay: null,     // id de método a ajustar, o '__total__' para el saldo global
+  adjustOn: null,      // al ajustar el total: método donde se apunta la diferencia
+  // saldo por método
+  cardView: null,      // id del método abierto en la vista de detalle (null = Inicio)
+  movFrom: null,       // sheet de traspaso: origen
+  movTo: null,         // sheet de traspaso: destino
+  autoAdded: 0,        // movimientos añadidos solos por el Atajo (aviso en Inicio)
   // modal state
   editingId: null,
   modalCat: 'auto',
@@ -318,6 +352,34 @@ function defaultPay() {
   var m = state.payments.filter(function(p){ return !p.hidden && p.mine; })[0] ||
           state.payments.filter(function(p){ return !p.hidden; })[0];
   return m ? m.id : (state.payments[0] ? state.payments[0].id : null);
+}
+// El Atajo del iPhone manda lo que se ve en su menú ("🍔 Comida"), no el id
+// interno — se acepta cualquiera de los dos. normLoose quita tildes, mayúsculas,
+// emojis y puntuación para que el menú del Atajo se pueda escribir bonito.
+function normLoose(s) {
+  return norm(s).replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function resolvePayment(v) {
+  var s = String(v == null ? '' : v).trim();
+  if (!s) return null;
+  if (PAYMENTS[s] && !PAYMENTS[s].hidden) return s;
+  var n = normLoose(s);
+  if (!n) return null;
+  var hit = state.payments.filter(function(p){
+    return !p.hidden && (normLoose(p.label) === n || normLoose(p.short) === n || normLoose(p.id) === n);
+  })[0];
+  return hit ? hit.id : null;
+}
+function resolveCategory(v, type) {
+  var list = type === 'income' ? INC_CATS : EXP_CATS;
+  var s = String(v == null ? '' : v).trim();
+  if (list.indexOf(s) !== -1) return s;
+  var n = normLoose(s);
+  if (!n) return 'otros';
+  var hit = list.filter(function(c){
+    return normLoose(catLabel(c)) === n || normLoose(catShort(c)) === n || normLoose(c) === n;
+  })[0];
+  return hit || 'otros';
 }
 
 // ── Storage ────────────────────────────────────────────────────────────────
@@ -401,6 +463,8 @@ function fmtEur(n) {
   return '€' + Math.abs(n).toLocaleString('es-ES',{minimumFractionDigits:2,maximumFractionDigits:2});
 }
 function signed(n) { return (n<0?'−':'+') + fmtEur(n); }
+// Un saldo se lee como cantidad, no como movimiento: sin "+" delante.
+function balStr(n) { return (n < -0.005 ? '−' : '') + fmtEur(n); }
 function uid() { return Date.now().toString() + Math.random().toString(36).slice(2,6); }
 function sanitizeAmt(v) { return String(v).replace(/,/g,'.').replace(/[^0-9.]/g,''); }
 function esc(s) {
@@ -418,9 +482,12 @@ function entriesSorted() {
 function entriesForMode(mode) {
   return mode === 'mine' ? state.entries.filter(function(e){ return payInfo(e.payment).mine !== false; }) : state.entries;
 }
-// 'ajuste' (corrección de saldo) y 'ahorro' (transferencias a objetivos) cuentan
-// en el balance pero NO son gasto/ingreso real — se excluyen de las estadísticas
-function isTracked(e) { return e.category !== 'ajuste' && e.category !== 'ahorro'; }
+// 'ajuste' (corrección de saldo), 'ahorro' (transferencias a objetivos) y
+// 'traspaso' (mover dinero entre métodos) cuentan en el balance pero NO son
+// gasto/ingreso real — se excluyen de todas las estadísticas
+function isTracked(e) {
+  return e.category !== 'ajuste' && e.category !== 'ahorro' && e.category !== 'traspaso';
+}
 function trackedOf(list) { return list.filter(isTracked); }
 function goalSaved(gid) {
   return state.entries.reduce(function(s,e){
@@ -436,6 +503,52 @@ function currentMineBalance() {
   return sumBy(l,'income') - sumBy(l,'expense');
 }
 
+// ── Saldo por método de pago ───────────────────────────────────────────────
+// Entradas de un método concreto (incluye ajustes, ahorro y traspasos: todos
+// mueven dinero real dentro/fuera de esa tarjeta o del efectivo).
+function payEntries(id) {
+  return state.entries.filter(function(e){ return e.payment === id; });
+}
+// Saldo real de un método: todo lo que ha entrado menos todo lo que ha salido.
+function payBalance(id) {
+  return payEntries(id).reduce(function(s,e){
+    return s + (e.type === 'income' ? e.amount : -e.amount);
+  }, 0);
+}
+// Para métodos que no son mi dinero (p. ej. la tarjeta de la tía) un "saldo"
+// no significa nada — lo que importa es cuánto se ha gastado en total.
+function paySpent(id, month) {
+  return payEntries(id).reduce(function(s,e){
+    if (e.type !== 'expense' || !isTracked(e)) return s;
+    if (month && monthOf(e.date) !== month) return s;
+    return s + e.amount;
+  }, 0);
+}
+// Cifra principal de la tarjeta: saldo si es mío, gasto acumulado si no lo es.
+function payHeadline(id) {
+  return payInfo(id).mine === false ? paySpent(id) : payBalance(id);
+}
+
+// ── Traspasos entre métodos ────────────────────────────────────────────────
+// Sacar dinero del cajero o pasar efectivo a la tarjeta no es un gasto: es el
+// mismo dinero cambiando de sitio. Se guardan DOS movimientos hermanados por
+// transferId (salida en el origen, entrada en el destino) para que los dos
+// saldos cuadren y el total no cambie.
+function makeTransfer(from, to, amount, date) {
+  var tid = uid();
+  var d = date || todayStr();
+  var fromLbl = payInfo(from).short, toLbl = payInfo(to).short;
+  state.entries.unshift({
+    id: uid(), transferId: tid, type: 'expense', amount: amount,
+    description: 'Traspaso → ' + toLbl, category: 'traspaso', payment: from, date: d
+  });
+  state.entries.unshift({
+    id: uid(), transferId: tid, type: 'income', amount: amount,
+    description: 'Traspaso ← ' + fromLbl, category: 'traspaso', payment: to, date: d
+  });
+  return tid;
+}
+
 // ── Categories (teen, Canarias) ────────────────────────────────────────────
 var EXP_CATS = ['comida_snacks','transporte','ocio','ropa','tecnologia',
                 'cuidado_personal','material_escolar','suscripciones','deporte_hobbies','otros'];
@@ -446,14 +559,14 @@ var CAT_LABELS = {
   tecnologia:'Tecnología', cuidado_personal:'Cuidado personal', material_escolar:'Material escolar',
   suscripciones:'Suscripciones', deporte_hobbies:'Deporte y hobbies', otros:'Otros',
   salario:'Salario', freelance:'Freelance',
-  ajuste:'Ajuste de saldo', ahorro:'Ahorro'
+  ajuste:'Ajuste de saldo', ahorro:'Ahorro', traspaso:'Traspaso'
 };
 var CAT_SHORT = {
   comida_snacks:'Comida', transporte:'Transporte', ocio:'Ocio', ropa:'Ropa',
   tecnologia:'Tecno', cuidado_personal:'Personal', material_escolar:'Escolar',
   suscripciones:'Suscrip.', deporte_hobbies:'Deporte', otros:'Otros',
   salario:'Salario', freelance:'Freelance',
-  ajuste:'Ajuste', ahorro:'Ahorro'
+  ajuste:'Ajuste', ahorro:'Ahorro', traspaso:'Traspaso'
 };
 function catLabel(c) { return CAT_LABELS[c] || c; }
 function catShort(c) { return CAT_SHORT[c] || c; }
@@ -634,6 +747,38 @@ function cleanMerchant(s) {
   }
   return s.substring(0,40);
 }
+// ── Registro automático (doble toque en la parte de atrás del iPhone) ──────
+// El Atajo manda un JSON ya completo (importe + método + categoría) marcado
+// con auto:true. A diferencia de un pago de Apple Pay, aquí no hay nada que
+// adivinar, así que entra solo en el balance en vez de pasar por la cola.
+// Si el DELETE del fichero falla, la próxima sincronización volvería a verlo:
+// por eso se guarda el nombre de cada fichero ya procesado.
+function autoDoneList() {
+  var a = lsGet('ft_autodone', []);
+  return Array.isArray(a) ? a : [];
+}
+function markAutoDone(name) {
+  var a = autoDoneList();
+  if (a.indexOf(name) === -1) a.push(name);
+  lsSet('ft_autodone', a.slice(-300));
+}
+function buildAutoEntry(obj) {
+  var amt = parseAmountLenient(obj.amount);
+  if (!(amt > 0)) return null;
+  var type = String(obj.type || 'expense').toLowerCase() === 'income' ? 'income' : 'expense';
+  var pay  = resolvePayment(obj.payment != null ? obj.payment : obj.card) || defaultPay();
+  if (!pay) return null;
+  var cat  = resolveCategory(obj.category, type);
+  var desc = String(obj.merchant || obj.description || '').trim();
+  return {
+    id: uid(), type: type, amount: amt,
+    description: desc ? cleanMerchant(desc) : catLabel(cat),
+    category: cat, payment: pay,
+    date: parsePendingDate(obj.ts || obj.date)
+  };
+}
+function isAutoFlag(v) { return v === true || v === 1 || /^(true|1|si|sí|yes)$/i.test(String(v||'')); }
+
 var pendingFetchedAt = 0;
 async function fetchPending(force) {
   if (!state.ghToken || !state.ghRepo || state.pendingBusy) return;
@@ -648,13 +793,22 @@ async function fetchPending(force) {
       var files = (Array.isArray(list)?list:[]).filter(function(f){
         return f.type==='file' && /^[\w.-]+\.json$/.test(f.name);
       });
-      var items = [];
+      var items = [], added = 0, done = autoDoneList();
       for (var i=0; i<files.length && i<20; i++) {
         var fr = await ghApi('/contents/pending/'+encodeURIComponent(files[i].name));
         if (!fr.ok) continue;
         var fd = await fr.json();
         var obj = {};
         try { obj = JSON.parse(b64DecodeUtf8(fd.content||'')) || {}; } catch(e) {}
+        // Registro automático: ya viene todo decidido, se apunta y se borra
+        if (isAutoFlag(obj.auto)) {
+          if (done.indexOf(files[i].name) === -1) {
+            var ent = buildAutoEntry(obj);
+            if (ent) { state.entries.unshift(ent); added++; markAutoDone(files[i].name); }
+          }
+          await deletePending(files[i].name, files[i].sha);
+          continue;
+        }
         items.push({
           name: files[i].name, sha: files[i].sha,
           merchant: String(obj.merchant||obj.name||'Compra').substring(0,60),
@@ -665,13 +819,14 @@ async function fetchPending(force) {
       }
       items.sort(function(a,b){ return a.name<b.name ? 1 : -1; }); // más reciente arriba
       state.pending = items;
+      if (added) { save(); state.autoAdded = added; }
       pendingFetchedAt = Date.now();
     }
   } catch(e) {
     state.pendingErr = e.message || 'error';
   }
   state.pendingBusy = false;
-  if (state.activeTab === 0) render();
+  if (state.activeTab === 0 || state.autoAdded) render();
 }
 async function deletePending(name, sha) {
   state.pending = state.pending.filter(function(p){ return p.name !== name; });
@@ -798,6 +953,7 @@ var callClaude = ClaudeAI.callClaude, inferCategory = ClaudeAI.inferCategory;
 // ── Tab navigation ─────────────────────────────────────────────────────────
 function setTab(i) {
   state.activeTab = i;
+  state.cardView = null;   // pulsar una pestaña siempre sale del detalle
   ['ti0','ti1','ti2','ti3','ti4'].forEach(function(id,idx){
     document.getElementById(id).className='tab-icon'+(idx===i?' active':'');
   });
@@ -962,7 +1118,7 @@ function askDelEntry() {
 }
 function doDelEntry() {
   var id = state.editingId;
-  state.entries = state.entries.filter(function(e){ return e.id !== id; });
+  removeEntry(id);
   save();
   state.editingId = null;
   closeModal();
@@ -971,47 +1127,84 @@ function doDelEntry() {
 
 // ── Ajustar saldo ──────────────────────────────────────────────────────────
 // Crea un movimiento 'ajuste' por la diferencia entre el saldo real y el de la
-// app. Siempre ajusta "Mi dinero" (los métodos que cuentan como propios).
+// app. Se puede ajustar un método concreto ("en la cartera tengo 12 €") o el
+// total de "Mi dinero", eligiendo entonces dónde apuntar la diferencia.
+var ADJ_TOTAL = '__total__';
 function adjMineIds() {
   var ids = state.payments.filter(function(p){ return !p.hidden && p.mine; }).map(function(p){ return p.id; });
   return ids.length ? ids : PAY_IDS.slice();
 }
+function adjIsTotal() { return state.adjustPay === ADJ_TOTAL; }
+// Saldo que el ajuste va a corregir, según el objetivo elegido
+function adjCurrent() {
+  return adjIsTotal() ? currentMineBalance() : payBalance(state.adjustPay);
+}
 function adjChipsHtml() {
-  return adjMineIds().map(function(p){
+  var chips = '<button class="chip chip-sm'+(adjIsTotal()?' on':'')+'" onclick="setAdjustPay(\''+ADJ_TOTAL+'\')">∑ Total</button>';
+  return chips + adjMineIds().map(function(p){
     var pi = payInfo(p);
     return '<button class="chip chip-sm'+(state.adjustPay===p?' on':'')+'" onclick="setAdjustPay(\''+p+'\')">'+pi.icon+' '+esc(pi.short)+'</button>';
   }).join('');
 }
-function openAdjust() {
-  state.adjustPay = defaultPay();
-  var cur = currentMineBalance();
+// Sólo hace falta elegir "dónde apuntarlo" cuando se ajusta el total: si el
+// objetivo es un método concreto, el ajuste va obviamente en ese método.
+function adjOnChipsHtml() {
+  if (!adjIsTotal()) return '';
+  return '<div style="margin-bottom:14px">'+
+    '<div class="section-label" style="margin-bottom:7px">Apuntar la diferencia en</div>'+
+    '<div class="chips">'+adjMineIds().map(function(p){
+      var pi = payInfo(p);
+      return '<button class="chip chip-sm'+(state.adjustOn===p?' on':'')+'" onclick="setAdjustOn(\''+p+'\')">'+pi.icon+' '+esc(pi.short)+'</button>';
+    }).join('')+'</div></div>';
+}
+function setAdjustOn(p) {
+  state.adjustOn = p;
+  var el = document.getElementById('adj-on');
+  if (el) el.innerHTML = adjOnChipsHtml();
+}
+// target: id de método (ajusta ese saldo) u omitido (ajusta el total)
+function openAdjust(target) {
+  var mine = adjMineIds();
+  state.adjustPay = (target && mine.indexOf(target) !== -1) ? target : ADJ_TOTAL;
+  state.adjustOn  = defaultPay();
   document.getElementById('adj-sheet').innerHTML =
     '<div style="width:36px;height:4px;background:#2a2a2a;border-radius:2px;margin:14px auto 20px"></div>'+
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">'+
       '<div style="font-size:20px;font-weight:800;letter-spacing:-.8px">Ajustar saldo</div>'+
       '<button onclick="closeAdjust()" class="pressable" style="background:#1a1a1a;border:none;color:#666;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center">×</button>'+
     '</div>'+
-    '<div style="font-size:13px;color:#555;margin-bottom:16px">Mi dinero según la app: <b style="color:#aaa">'+signed(cur)+'</b><br>Escribe cuánto tienes <b style="color:#aaa">en realidad</b> y se creará un movimiento de ajuste por la diferencia.</div>'+
+    '<div style="margin-bottom:14px">'+
+      '<div class="section-label" style="margin-bottom:7px">Qué saldo estoy corrigiendo</div>'+
+      '<div class="chips" id="adj-chips">'+adjChipsHtml()+'</div>'+
+    '</div>'+
+    '<div id="adj-cur" style="font-size:13px;color:#777;margin-bottom:16px">'+adjCurLine()+'</div>'+
     '<div style="position:relative;margin-bottom:14px">'+
       '<span style="position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:26px;color:#333;font-weight:700;pointer-events:none">€</span>'+
       '<input id="adj-input" type="text" inputmode="decimal" placeholder="0,00"'+
       ' style="width:100%;background:#111;border:1px solid #1c1c1c;border-radius:12px;padding:16px 14px 16px 44px;color:#fff;font-size:32px;font-weight:800;outline:none;letter-spacing:-1.5px"'+
       ' oninput="updateAdjPreview()" onkeydown="if(event.key===\'Enter\')saveAdjust()">'+
     '</div>'+
-    '<div style="margin-bottom:14px">'+
-      '<div class="section-label" style="margin-bottom:7px">Asignar el ajuste a</div>'+
-      '<div class="chips" id="adj-chips">'+adjChipsHtml()+'</div>'+
-    '</div>'+
-    '<div id="adj-preview" style="font-size:13px;color:#3a3a3a;min-height:18px;margin-bottom:14px"></div>'+
+    '<div id="adj-on">'+adjOnChipsHtml()+'</div>'+
+    '<div id="adj-preview" style="font-size:13px;color:#777;min-height:18px;margin-bottom:14px"></div>'+
     '<button id="adj-save" onclick="saveAdjust()" style="width:100%;padding:17px;background:#141414;color:#2a2a2a;border:none;border-radius:12px;font-size:16px;font-weight:800;cursor:default;letter-spacing:-.3px;min-height:54px">Crear ajuste</button>';
   document.getElementById('adj-overlay').classList.add('show');
   setTimeout(function(){ var i=document.getElementById('adj-input'); if(i) i.focus(); }, 330);
+}
+function adjCurLine() {
+  var what = adjIsTotal() ? 'Mi dinero' : payInfo(state.adjustPay).label;
+  return esc(what)+' según la app: <b style="color:#ddd">'+balStr(adjCurrent())+'</b><br>'+
+         'Escribe cuánto hay <b style="color:#ddd">en realidad</b> y se creará un ajuste por la diferencia.';
 }
 function closeAdjust() { document.getElementById('adj-overlay').classList.remove('show'); }
 function setAdjustPay(p) {
   state.adjustPay = p;
   var el = document.getElementById('adj-chips');
   if (el) el.innerHTML = adjChipsHtml();
+  var cu = document.getElementById('adj-cur');
+  if (cu) cu.innerHTML = adjCurLine();
+  var on = document.getElementById('adj-on');
+  if (on) on.innerHTML = adjOnChipsHtml();
+  updateAdjPreview();
 }
 function adjParse() {
   var el = document.getElementById('adj-input');
@@ -1027,9 +1220,14 @@ function updateAdjPreview() {
   if (isNaN(v)) {
     msg = '';
   } else {
-    var diff = Math.round((v - currentMineBalance())*100)/100;
+    var diff = Math.round((v - adjCurrent())*100)/100;
     if (Math.abs(diff) < 0.005) msg = 'El saldo ya coincide ✓';
-    else { ok = true; msg = 'Se creará un ajuste de <b style="color:#aaa">'+(diff>0?'+':'−')+fmtEur(Math.abs(diff))+'</b>'; }
+    else {
+      ok = true;
+      var dest = adjIsTotal() ? state.adjustOn : state.adjustPay;
+      msg = 'Se creará un ajuste de <b style="color:#ddd">'+(diff>0?'+':'−')+fmtEur(Math.abs(diff))+'</b>'+
+            ' en '+esc(payInfo(dest).label);
+    }
   }
   if (pv) pv.innerHTML = msg;
   if (btn) {
@@ -1041,15 +1239,106 @@ function updateAdjPreview() {
 function saveAdjust() {
   var v = adjParse();
   if (isNaN(v)) return;
-  var diff = Math.round((v - currentMineBalance())*100)/100;
+  var diff = Math.round((v - adjCurrent())*100)/100;
   if (Math.abs(diff) < 0.005) return;
+  var dest = adjIsTotal() ? (state.adjustOn || defaultPay()) : state.adjustPay;
   state.entries.unshift({
     id: uid(), type: diff>0 ? 'income' : 'expense', amount: Math.abs(diff),
     description: 'Ajuste de saldo', category: 'ajuste',
-    payment: state.adjustPay || defaultPay(), date: todayStr()
+    payment: dest || defaultPay(), date: todayStr()
   });
   save(); closeAdjust(); render();
 }
+
+// ── Mover dinero entre métodos ─────────────────────────────────────────────
+// Sacar del cajero, meter efectivo en el banco, devolverle dinero a alguien:
+// el total no cambia, sólo cambia de bolsillo.
+function movIds() {
+  var ids = state.payments.filter(function(p){ return !p.hidden && p.mine; }).map(function(p){ return p.id; });
+  return ids.length ? ids : PAY_IDS.slice();
+}
+function openMove(from) {
+  var ids = movIds();
+  if (ids.length < 2) return;
+  state.movFrom = (from && ids.indexOf(from) !== -1) ? from : ids[0];
+  state.movTo   = ids.filter(function(p){ return p !== state.movFrom; })[0];
+  document.getElementById('mov-sheet').innerHTML =
+    '<div style="width:36px;height:4px;background:#2a2a2a;border-radius:2px;margin:14px auto 20px"></div>'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'+
+      '<div style="font-size:20px;font-weight:800;letter-spacing:-.8px">Mover dinero</div>'+
+      '<button onclick="closeMove()" class="pressable" style="background:#1a1a1a;border:none;color:#666;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center">×</button>'+
+    '</div>'+
+    '<div style="font-size:13px;color:#777;margin-bottom:16px">Ni gasto ni ingreso: el mismo dinero cambia de sitio. Tu total no se mueve.</div>'+
+    '<div style="position:relative;margin-bottom:16px">'+
+      '<span style="position:absolute;left:16px;top:50%;transform:translateY(-50%);font-size:26px;color:#333;font-weight:700;pointer-events:none">€</span>'+
+      '<input id="mov-input" type="text" inputmode="decimal" placeholder="0,00"'+
+      ' style="width:100%;background:#111;border:1px solid #1c1c1c;border-radius:12px;padding:16px 14px 16px 44px;color:#fff;font-size:32px;font-weight:800;outline:none;letter-spacing:-1.5px"'+
+      ' oninput="updateMovePreview()" onkeydown="if(event.key===\'Enter\')saveMove()">'+
+    '</div>'+
+    '<div id="mov-rows">'+movRowsHtml()+'</div>'+
+    '<div id="mov-preview" style="font-size:13px;color:#777;min-height:18px;margin-bottom:14px"></div>'+
+    '<button id="mov-save" onclick="saveMove()" style="width:100%;padding:17px;background:#141414;color:#2a2a2a;border:none;border-radius:12px;font-size:16px;font-weight:800;cursor:default;letter-spacing:-.3px;min-height:54px">Mover</button>';
+  document.getElementById('mov-overlay').classList.add('show');
+  setTimeout(function(){ var i=document.getElementById('mov-input'); if(i) i.focus(); }, 330);
+}
+function movChips(which) {
+  return movIds().map(function(p){
+    var pi = payInfo(p), on = state[which] === p;
+    return '<button class="chip chip-sm'+(on?' on':'')+'" onclick="setMove(\''+which+'\',\''+p+'\')">'+pi.icon+' '+esc(pi.short)+'</button>';
+  }).join('');
+}
+function movRowsHtml() {
+  return '<div style="margin-bottom:12px">'+
+      '<div class="section-label" style="margin-bottom:7px">Sale de</div>'+
+      '<div class="chips">'+movChips('movFrom')+'</div>'+
+      '<div style="font-size:11px;color:#666;margin-top:5px">Saldo ahora: '+balStr(payBalance(state.movFrom))+'</div>'+
+    '</div>'+
+    '<div style="margin-bottom:14px">'+
+      '<div class="section-label" style="margin-bottom:7px">Entra en</div>'+
+      '<div class="chips">'+movChips('movTo')+'</div>'+
+      '<div style="font-size:11px;color:#666;margin-top:5px">Saldo ahora: '+balStr(payBalance(state.movTo))+'</div>'+
+    '</div>';
+}
+// Origen y destino nunca pueden ser el mismo: al elegir uno, el otro se aparta.
+function setMove(which, p) {
+  state[which] = p;
+  var other = which === 'movFrom' ? 'movTo' : 'movFrom';
+  if (state[other] === p) {
+    state[other] = movIds().filter(function(x){ return x !== p; })[0] || null;
+  }
+  var el = document.getElementById('mov-rows');
+  if (el) el.innerHTML = movRowsHtml();
+  updateMovePreview();
+}
+function movParse() {
+  var el = document.getElementById('mov-input');
+  if (!el || !el.value.trim()) return NaN;
+  var v = parseFloat(sanitizeAmt(el.value.trim()));
+  return (isNaN(v) || v <= 0) ? NaN : Math.round(v*100)/100;
+}
+function updateMovePreview() {
+  var pv = document.getElementById('mov-preview'), btn = document.getElementById('mov-save');
+  var v = movParse();
+  var ok = !isNaN(v) && state.movFrom && state.movTo && state.movFrom !== state.movTo;
+  if (pv) {
+    pv.innerHTML = ok
+      ? 'Quedaría: '+esc(payInfo(state.movFrom).short)+' <b style="color:#ddd">'+balStr(payBalance(state.movFrom)-v)+'</b>'+
+        ' &nbsp;→&nbsp; '+esc(payInfo(state.movTo).short)+' <b style="color:#ddd">'+balStr(payBalance(state.movTo)+v)+'</b>'
+      : '';
+  }
+  if (btn) {
+    btn.style.background = ok ? '#fff' : '#141414';
+    btn.style.color      = ok ? '#000' : '#2a2a2a';
+    btn.style.cursor     = ok ? 'pointer' : 'default';
+  }
+}
+function saveMove() {
+  var v = movParse();
+  if (isNaN(v) || !state.movFrom || !state.movTo || state.movFrom === state.movTo) return;
+  makeTransfer(state.movFrom, state.movTo, v);
+  save(); closeMove(); render();
+}
+function closeMove() { document.getElementById('mov-overlay').classList.remove('show'); }
 
 function onDescInput() {
   validateModal();
@@ -1236,14 +1525,20 @@ return { buildDonut: buildDonut, buildTrendChart: buildTrendChart, buildBalanceC
 var buildDonut = Charts.buildDonut, buildTrendChart = Charts.buildTrendChart,
     buildBalanceChart = Charts.buildBalanceChart;
 
-function animateNum(el, from, to) {
+function animateNum(el, from, to, fmt) {
+  fmt = fmt || signed;
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      el.textContent = fmt(to); return;
+    }
+  } catch(e) {}
   var start = null, dur = 550;
   function tick(t){
     if (!start) start = t;
     var p = Math.min(1,(t-start)/dur);
     p = 1 - Math.pow(1-p, 3);
     var v = from + (to-from)*p;
-    el.textContent = signed(v);
+    el.textContent = fmt(v);
     if (p < 1) requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
@@ -1262,7 +1557,11 @@ function render() {
   if (tabbar) tabbar.style.display = '';
   if (fab) fab.style.display = '';
   var t  = state.activeTab;
-  if      (t===0) el.innerHTML = renderDashboard();
+  // El detalle de un método vive dentro de Inicio, no es una pestaña aparte.
+  // Si el método ya no existe (borrado o restaurado desde otro backup), se cae
+  // de vuelta al panel en vez de renderizar una vista vacía.
+  if (t !== 0 || !PAYMENTS[state.cardView]) state.cardView = null;
+  if      (t===0) el.innerHTML = state.cardView ? renderCardDetail() : renderDashboard();
   else if (t===1) el.innerHTML = renderTransactions();
   else if (t===2) el.innerHTML = renderSavings();
   else if (t===3) el.innerHTML = renderAnalysis();
@@ -1364,28 +1663,8 @@ function renderDashboard() {
         '</div>'+balSvg+'</div>'
     : '';
 
-  // Payment breakdown (month, always all entries, real spending only)
-  var payHtml='';
-  var anyPay=false;
-  var payCells = PAY_IDS.map(function(p){
-    var pi = payInfo(p);
-    var v = entsAll.filter(function(e){ return e.type==='expense' && e.payment===p && monthOf(e.date)===cm && isTracked(e); })
-                   .reduce(function(s,e){ return s+e.amount; },0);
-    if (v>0) anyPay=true;
-    return '<div style="background:#000;padding:14px 12px;text-align:center">'+
-      '<div style="font-size:15px;margin-bottom:5px;opacity:.5">'+pi.icon+'</div>'+
-      '<div style="font-size:13px;font-weight:700;font-variant-numeric:tabular-nums">'+fmtEur(v)+'</div>'+
-      '<div style="font-size:9.5px;color:#3a3a3a;margin-top:3px;letter-spacing:.04em;text-transform:uppercase">'+esc(pi.short)+'</div>'+
-      '</div>';
-  }).join('');
-  if (anyPay) {
-    var nPay = PAY_IDS.length;
-    var payCols = nPay<=3 ? nPay : (nPay===4 ? 2 : 3);
-    payHtml='<div style="padding:22px 20px 0">'+
-      '<div class="section-label" style="margin-bottom:10px">Gasto por método · este mes</div>'+
-      '<div style="display:grid;grid-template-columns:repeat('+payCols+',1fr);gap:1px;background:#141414;border:1px solid #141414;border-radius:12px;overflow:hidden">'+payCells+'</div>'+
-      '</div>';
-  }
+  // Saldo por método — cada tarjeta/efectivo por separado, se pulsa para entrar
+  var payHtml = payCardsHtml();
 
   // Trend (real income/spending only)
   var trendSvg=buildTrendChart(trackedOf(entsM)), trendHtml='';
@@ -1407,6 +1686,21 @@ function renderDashboard() {
   var savedHtml = savedTot > 0.005
     ? '<div style="font-size:13px;color:#3a3a3a;margin-top:6px;cursor:pointer" onclick="setTab(2)">⬡ Ahorrado: <span style="color:#888;font-weight:600">'+fmtEur(savedTot)+'</span> <span style="color:#2a2a2a">· fuera del balance →</span></div>'
     : '';
+
+  // Aviso: lo que entró solo por el doble toque, para que nada aparezca
+  // en el balance sin que se sepa de dónde ha salido
+  var autoHtml='';
+  if (state.autoAdded > 0) {
+    var nA = state.autoAdded;
+    autoHtml='<div style="padding:16px 20px 0">'+
+      '<div class="card anim-in" style="border-color:#262626;display:flex;align-items:center;gap:10px">'+
+        '<div style="flex:1;min-width:0">'+
+          '<div style="font-size:13px;font-weight:700">✓ '+nA+' movimiento'+(nA===1?'':'s')+' desde el iPhone</div>'+
+          '<div style="font-size:11px;color:#777;margin-top:2px">Añadido'+(nA===1?'':'s')+' solo'+(nA===1?'':'s')+' con el doble toque. Desliza en Movs. para corregir.</div>'+
+        '</div>'+
+        '<button onclick="state.autoAdded=0;render()" class="pressable" aria-label="Ocultar aviso" style="background:#1a1a1a;border:none;color:#888;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:16px;flex-shrink:0;display:flex;align-items:center;justify-content:center">×</button>'+
+      '</div></div>';
+  }
 
   // Cola "Por confirmar" (Apple Pay inbox)
   var pendHtml='';
@@ -1465,13 +1759,13 @@ function renderDashboard() {
       '</div>'+
       savedHtml+
     '</div>'+
-    pendHtml+
+    autoHtml + pendHtml+
     '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:#111;border-bottom:1px solid #111">'+
       dashCard('Ingresos',fmtEur(mInc),'este mes')+
       dashCard('Gastos',fmtEur(mExp),'este mes')+
       dashCard('Neto',signed(mNet),'este mes')+
     '</div>'+
-    budgetHtml + balChartHtml + payHtml + donutHtml + trendHtml +
+    payHtml + budgetHtml + balChartHtml + donutHtml + trendHtml +
     '<div style="padding:22px 20px 0">'+
       '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">'+
         '<div class="section-label">Recientes</div>'+
@@ -1480,12 +1774,154 @@ function renderDashboard() {
     '</div></div>';
 }
 
+// Fila de tarjetas de saldo. La cifra grande es el saldo real del método; en
+// los que no son mi dinero (la tarjeta de la tía) un saldo no significa nada,
+// así que se enseña lo gastado en total.
+// Qué métodos merecen una tarjeta: los activos, más los archivados (o borrados
+// tras restaurar un backup) que TODAVÍA guardan dinero. Si no se enseñan, las
+// tarjetas no suman lo mismo que "Mi dinero" y parece que falta dinero.
+function balanceCardIds() {
+  var ids = PAY_IDS.slice(), seen = {};
+  ids.forEach(function(i){ seen[i] = true; });
+  state.entries.forEach(function(e){
+    var id = e.payment;
+    if (!id || seen[id]) return;
+    seen[id] = true;
+    var pi = payInfo(id);
+    var holds = pi.mine === false ? paySpent(id) > 0.005 : Math.abs(payBalance(id)) > 0.005;
+    if (holds) ids.push(id);
+  });
+  return ids;
+}
+
+function payCardsHtml() {
+  var showIds = balanceCardIds();
+  if (!showIds.length) return '';
+  var cm = currentMonth();
+  var cells = showIds.map(function(p){
+    var pi = payInfo(p);
+    var isMine = pi.mine !== false;
+    var archived = PAY_IDS.indexOf(p) === -1;
+    var val = isMine ? payBalance(p) : paySpent(p);
+    var monthSpend = paySpent(p, cm);
+    var sub = archived
+      ? 'archivado'
+      : isMine
+        ? (monthSpend > 0.005 ? '−'+fmtEur(monthSpend)+' este mes' : 'sin gastos este mes')
+        : 'gastado · no es tuyo';
+    return '<button class="paycard pressable'+(isMine && val < -0.005 ? ' paycard-neg' : '')+'"'+
+      ' onclick="openCard(\''+esc(p)+'\')"'+
+      ' aria-label="'+esc(pi.label)+', '+esc(isMine ? balStr(val) : fmtEur(val))+'. Ver detalle">'+
+      '<div class="paycard-top"><span class="paycard-ico"'+(archived?' style="opacity:.3"':'')+'>'+pi.icon+'</span><span class="paycard-go">›</span></div>'+
+      '<div class="paycard-val">'+(isMine ? balStr(val) : fmtEur(val))+'</div>'+
+      '<div class="paycard-name">'+esc(pi.short)+'</div>'+
+      '<div class="paycard-sub">'+esc(sub)+'</div>'+
+      '</button>';
+  }).join('');
+  var n = showIds.length;
+  var cols = n <= 3 ? n : (n === 4 ? 2 : 3);
+  var moveBtn = movIds().length > 1
+    ? '<button onclick="openMove()" style="background:none;border:none;color:#777;font-size:12px;cursor:pointer;padding:4px">⇄ Mover dinero</button>'
+    : '';
+  return '<div style="padding:22px 20px 0">'+
+    '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">'+
+      '<div class="section-label">Saldo por método</div>'+moveBtn+
+    '</div>'+
+    '<div class="paygrid" style="grid-template-columns:repeat('+cols+',1fr)">'+cells+'</div>'+
+    '</div>';
+}
+
 function dashCard(label,val,sub) {
   return '<div style="background:#000;padding:15px 12px">'+
     '<div class="section-label" style="margin-bottom:6px">'+esc(label)+'</div>'+
     '<div style="font-size:14px;font-weight:700;letter-spacing:-.5px;font-variant-numeric:tabular-nums">'+esc(val)+'</div>'+
     '<div style="font-size:10px;color:#2e2e2e;margin-top:3px">'+esc(sub)+'</div>'+
     '</div>';
+}
+
+// ── Detalle de un método ───────────────────────────────────────────────────
+// Se abre pulsando una tarjeta de saldo en Inicio: el mismo dinero, pero
+// mirado de uno en uno (saldo, evolución y sólo sus movimientos).
+function openCard(p) {
+  if (!PAYMENTS[p]) return;
+  state.cardView = p;
+  state.activeTab = 0;
+  window.scrollTo(0,0);
+  render();
+}
+function closeCard() { state.cardView = null; window.scrollTo(0,0); render(); }
+
+function renderCardDetail() {
+  var p = state.cardView, pi = payInfo(p);
+  var isMine = pi.mine !== false;
+  var ents = payEntries(p);
+  var cm = currentMonth(), pm = prevMonth();
+  var val = isMine ? payBalance(p) : paySpent(p);
+
+  // En un método propio la historia es el saldo; en uno ajeno, lo acumulado
+  // gastado (un "saldo" de la tarjeta de otra persona no significaría nada).
+  var chartEnts = isMine ? ents : ents.filter(function(e){
+    return e.type==='expense' && isTracked(e);
+  }).map(function(e){ return { date:e.date, type:'income', amount:e.amount }; });
+  var chartSvg = buildBalanceChart(chartEnts);
+  var chartHtml = chartSvg
+    ? '<div style="padding:22px 20px 0">'+
+        '<div class="section-label" style="margin-bottom:10px">'+
+          (isMine ? 'Saldo · últimos 30 días' : 'Gastado · acumulado 30 días')+'</div>'+
+        chartSvg+'</div>'
+    : '';
+
+  var tracked = ents.filter(isTracked);
+  var mIn  = sumBy(tracked.filter(function(e){ return monthOf(e.date)===cm; }), 'income');
+  var mOut = sumBy(tracked.filter(function(e){ return monthOf(e.date)===cm; }), 'expense');
+  var pOut = paySpent(p, pm);
+  var stats = isMine
+    ? dashCard('Entró', fmtEur(mIn), 'este mes') +
+      dashCard('Salió', fmtEur(mOut), 'este mes') +
+      dashCard('Neto', signed(mIn-mOut), 'este mes')
+    : dashCard('Este mes', fmtEur(mOut), fmtMonthLabel(cm)) +
+      dashCard('Mes pasado', fmtEur(pOut), fmtMonthLabel(pm)) +
+      dashCard('Total', fmtEur(paySpent(p)), 'desde el principio');
+
+  var actions = '';
+  if (isMine) {
+    var canMove = movIds().length > 1;
+    actions = '<div style="display:flex;gap:8px;padding:20px 20px 0">'+
+      '<button class="pressable" onclick="openAdjust(\''+esc(p)+'\')" style="flex:1;padding:12px;background:#111;border:1px solid #1c1c1c;border-radius:10px;color:#aaa;font-size:13px;font-weight:600;cursor:pointer;min-height:44px">✎ Ajustar saldo</button>'+
+      (canMove ? '<button class="pressable" onclick="openMove(\''+esc(p)+'\')" style="flex:1;padding:12px;background:#111;border:1px solid #1c1c1c;border-radius:10px;color:#aaa;font-size:13px;font-weight:600;cursor:pointer;min-height:44px">⇄ Mover dinero</button>' : '')+
+      '</div>';
+  }
+
+  var sorted = ents.slice().sort(function(a,b){
+    if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+    return b.id > a.id ? 1 : -1;
+  });
+  var rows = sorted.length === 0
+    ? '<div style="text-align:center;padding:48px 20px">'+
+        '<div style="font-size:34px;opacity:.14;margin-bottom:12px">'+pi.icon+'</div>'+
+        '<div style="font-size:15px;color:#666;font-weight:500">Nada en '+esc(pi.label)+' todavía</div>'+
+        '<div style="font-size:13px;color:#4a4a4a;margin-top:6px;line-height:1.5">Pulsa <b style="color:#888">+</b> y elige este método'+
+          (isMine && movIds().length>1 ? ',<br>o muévele dinero desde otro' : '')+'.</div>'+
+      '</div>'
+    : sorted.map(function(e,i){ return swipeRowHtml(e, Math.min(i,10)*30); }).join('');
+
+  return '<div class="anim-in">'+
+    '<div style="padding:56px 20px 20px;border-bottom:1px solid #0f0f0f">'+
+      '<button class="pressable" onclick="closeCard()" style="background:none;border:none;color:#888;font-size:13px;font-weight:600;cursor:pointer;padding:6px 8px 6px 0;margin-bottom:6px;min-height:36px">‹ Inicio</button>'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
+        '<div class="section-label">'+(isMine ? 'Saldo' : 'Gastado en total')+'</div>'+
+        '<div style="font-size:12px;color:#777">'+pi.icon+' '+esc(pi.label)+'</div>'+
+      '</div>'+
+      '<div id="hero-bal" data-fmt="bal" data-v="'+val+'" style="font-size:44px;font-weight:800;letter-spacing:-2.2px;line-height:1;font-variant-numeric:tabular-nums">'+balStr(val)+'</div>'+
+      (isMine
+        ? '<div style="font-size:12px;color:#666;margin-top:8px">'+sorted.length+' movimiento'+(sorted.length===1?'':'s')+' · cuenta en «Mi dinero»</div>'
+        : '<div style="font-size:12px;color:#666;margin-top:8px">No es tu dinero — fuera de «Mi dinero»</div>')+
+    '</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:#111;border-bottom:1px solid #111">'+stats+'</div>'+
+    actions + chartHtml +
+    '<div style="padding:22px 20px 0">'+
+      '<div class="section-label" style="margin-bottom:10px">Movimientos</div>'+rows+
+    '</div></div>';
 }
 
 function rowInner(e) {
@@ -1522,7 +1958,7 @@ function extraFilterCount() {
 function usedCategories() {
   var used = {};
   state.entries.forEach(function(e){ used[e.category] = true; });
-  var order = EXP_CATS.concat(INC_CATS, ['ahorro','ajuste']);
+  var order = EXP_CATS.concat(INC_CATS, ['ahorro','ajuste','traspaso']);
   var out = [], seen = {};
   order.forEach(function(c){ if (used[c] && !seen[c]) { out.push(c); seen[c] = true; } });
   Object.keys(used).forEach(function(c){ if (!seen[c]) out.push(c); });
@@ -1647,8 +2083,17 @@ function clearExtraFilters() {
   render();
 }
 function doDelete(id) {
-  state.entries = state.entries.filter(function(e){ return e.id !== id; });
+  removeEntry(id);
   save(); _swipeOpen=null; render();
+}
+// Un traspaso son dos movimientos hermanados: borrar sólo uno dejaría dinero
+// inventado o perdido, así que siempre se van los dos juntos.
+function removeEntry(id) {
+  var e = state.entries.find(function(x){ return x.id === id; });
+  var tid = e && e.transferId;
+  state.entries = state.entries.filter(function(x){
+    return tid ? x.transferId !== tid : x.id !== id;
+  });
 }
 function updateSearch(v) {
   state.searchQ=v; render();
@@ -2288,7 +2733,7 @@ function renderExport() {
       '<button id="clear-btn" onclick="doClear()" style="width:100%;padding:12px;background:#0d0d0d;color:#2a2a2a;border:1px solid #1c1c1c;border-radius:8px;font-size:14px;font-weight:600;cursor:default;min-height:44px">Borrar todo</button>'+
     '</div>'+
 
-    '<div style="text-align:center;font-size:11px;color:#222;margin-top:6px">v3.2 · Apple Pay «Por confirmar» + insights v3.1</div>'+
+    '<div style="text-align:center;font-size:11px;color:#333;margin-top:6px">v3.3 · saldo por método + traspasos + doble toque</div>'+
 
     '</div></div>';
 }
@@ -2411,6 +2856,7 @@ function doRestore() {
           payment:PAYMENTS[e.payment]?e.payment:defaultPay(),
           date:String(e.date).substring(0,10) };
         if(e.goalId) out.goalId=String(e.goalId);
+        if(e.transferId) out.transferId=String(e.transferId);
         return out;
       });
     state.entries=clean;
@@ -2525,11 +2971,16 @@ function attachListeners(tab) {
   if (tab===0) {
     var h=document.getElementById('hero-bal');
     if (h) {
+      var isBal=h.dataset.fmt==='bal';
       var target=parseFloat(h.dataset.v)||0;
-      var from=(typeof window.__hb==='number')?window.__hb:0;
-      if (from!==target) animateNum(h, from, target);
-      window.__hb=target;
+      // el saldo de una tarjeta y el total son cifras distintas: cada una
+      // arranca de la suya, no de la que hubiera antes en pantalla
+      var key=isBal?'__hbc':'__hb';
+      var from=(typeof window[key]==='number')?window[key]:0;
+      if (from!==target) animateNum(h, from, target, isBal?balStr:signed);
+      window[key]=target;
     }
+    if (state.cardView) attachSwipeListeners();
   }
   if (tab===1) attachSwipeListeners();
   if (tab===2) {
