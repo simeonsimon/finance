@@ -50,8 +50,28 @@ You already have all of this from the Apple Pay automation — nothing new to cr
 | Token | The same fine-grained PAT (Contents: Read and write) |
 | Folder | `pending/` inside that repo |
 
-If you don't remember the token, it's saved in the tracker under **Ajustes**.
-Copy it from there before you start — you'll need it at step 13.
+### Getting hold of the token again
+
+**GitHub will not show it to you a second time.** A personal access token is
+displayed once, when you create it, and stored hashed after that — there is no
+page on github.com that can reveal it. So don't go looking; use one of these
+instead, in order of least hassle:
+
+1. **From the tracker.** **Ajustes** → the Apple Pay card → **Copiar token**.
+   (If copying is blocked, tap **Ver** and long-press the token to copy it by
+   hand.) The field is a password box, and iOS refuses to copy from those —
+   that's why those two buttons exist.
+2. **From your existing Apple Pay automation.** Shortcuts → **Automation** →
+   open it → the **Get Contents of URL** action → tap the `Authorization`
+   header value. It reads `Bearer github_pat_…`; copy everything after
+   `Bearer `. This is plain text, so it always works.
+3. **Make a new one.** github.com → Settings → Developer settings →
+   Personal access tokens → Fine-grained tokens → the existing one →
+   **Regenerate**. You get a fresh value shown once.
+   **If you do this, the old token stops working immediately** — you must
+   paste the new one into *both* the tracker's Ajustes *and* the Authorization
+   header of your existing Apple Pay automation, or Apple Pay logging silently
+   breaks.
 
 > **Careful:** the token gets typed inside the shortcut. Don't share the
 > shortcut with anyone — shared shortcuts include the text of every action.

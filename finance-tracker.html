@@ -327,6 +327,7 @@ var state = {
   goalAction: null,    // {goalId, mode:'add'|'take', pay}
   goalEdit: null,
   goalDeleteAsk: null,
+  tokenVisible: false, // el token se enseña sólo a petición, y nunca se guarda así
   adjustPay: null,     // id de método a ajustar, o '__total__' para el saldo global
   adjustOn: null,      // al ajustar el total: método donde se apunta la diferencia
   // saldo por método
@@ -869,6 +870,25 @@ function dismissPending(name) {
   render();
 }
 function updateGhToken(v) { state.ghToken = String(v).trim(); lsSet('ft_ghtoken', state.ghToken); }
+// iOS no deja copiar de un campo type="password", así que el token quedaba
+// atrapado aquí dentro: GitHub sólo lo enseña una vez, al crearlo.
+function toggleTokenVisible() {
+  state.tokenVisible = !state.tokenVisible;
+  render();
+}
+async function copyToken() {
+  var st = document.getElementById('gh-status');
+  if (!state.ghToken) { if (st) st.textContent = 'No hay ningún token guardado.'; return; }
+  try {
+    await navigator.clipboard.writeText(state.ghToken);
+    if (st) st.textContent = '✓ Token copiado al portapapeles';
+  } catch(e) {
+    // sin permiso de portapapeles: al menos enseñarlo para copiarlo a mano
+    state.tokenVisible = true; render();
+    var st2 = document.getElementById('gh-status');
+    if (st2) st2.textContent = 'No he podido copiarlo solo — ahora está visible arriba, mantén pulsado para copiar.';
+  }
+}
 function updateGhRepo(v) {
   v = String(v).trim().replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'').replace(/\/+$/,'');
   state.ghRepo = v || 'simeonsimon/finance-inbox';
@@ -893,7 +913,8 @@ return {
   fetchPending: fetchPending, deletePending: deletePending,
   confirmPending: confirmPending, askDismissPending: askDismissPending,
   dismissPending: dismissPending, cleanMerchant: cleanMerchant,
-  updateGhToken: updateGhToken, updateGhRepo: updateGhRepo, testGhConn: testGhConn
+  updateGhToken: updateGhToken, updateGhRepo: updateGhRepo, testGhConn: testGhConn,
+  toggleTokenVisible: toggleTokenVisible, copyToken: copyToken
 };
 })();
 // alias globales — los onclick del HTML y el resto del código los usan por nombre
@@ -901,7 +922,8 @@ var fetchPending = GhInbox.fetchPending, deletePending = GhInbox.deletePending,
     confirmPending = GhInbox.confirmPending, askDismissPending = GhInbox.askDismissPending,
     dismissPending = GhInbox.dismissPending, cleanMerchant = GhInbox.cleanMerchant,
     updateGhToken = GhInbox.updateGhToken, updateGhRepo = GhInbox.updateGhRepo,
-    testGhConn = GhInbox.testGhConn;
+    testGhConn = GhInbox.testGhConn, toggleTokenVisible = GhInbox.toggleTokenVisible,
+    copyToken = GhInbox.copyToken;
 
 // ── Módulo: Anthropic API (IA para clasificar y analizar) ──────────────────
 var ClaudeAI = (function(){
@@ -2674,9 +2696,13 @@ function renderExport() {
     '<div class="card">'+
       '<div style="font-size:13px;font-weight:700;margin-bottom:4px">Apple Pay automático</div>'+
       '<div style="font-size:12px;color:#868686;line-height:1.5;margin-bottom:10px">El Atajo del iPhone guarda cada pago en tu repo privado de GitHub y aparece en Inicio como «Por confirmar». Pega aquí un token <b style="color:#9a9a9a">fine-grained</b> con acceso solo a ese repo (Contents: read/write). No se incluye en las copias de seguridad.</div>'+
-      '<input type="password" id="ghtoken-input" class="input-field" placeholder="github_pat_…" value="'+esc(state.ghToken)+'" oninput="updateGhToken(this.value)" style="margin-bottom:8px">'+
+      '<input type="'+(state.tokenVisible?'text':'password')+'" id="ghtoken-input" class="input-field" placeholder="github_pat_…" value="'+esc(state.ghToken)+'" oninput="updateGhToken(this.value)" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin-bottom:8px;font-size:'+(state.tokenVisible?'12px':'14px')+'">'+
       '<input type="text" id="ghrepo-input" class="input-field" placeholder="usuario/repo" value="'+esc(state.ghRepo)+'" onchange="updateGhRepo(this.value);render()" style="margin-bottom:8px;font-size:13px">'+
-      '<button class="chip chip-sm" onclick="testGhConn()">Probar conexión</button>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+        '<button class="chip chip-sm" onclick="testGhConn()">Probar conexión</button>'+
+        (state.ghToken ? '<button class="chip chip-sm" onclick="copyToken()">Copiar token</button>'+
+                         '<button class="chip chip-sm" onclick="toggleTokenVisible()">'+(state.tokenVisible?'Ocultar':'Ver')+'</button>' : '')+
+      '</div>'+
       '<div id="gh-status" style="font-size:11px;color:#909090;min-height:14px;margin-top:8px">'+(state.ghToken?'✓ Token guardado localmente':'')+'</div>'+
     '</div>'+
 
@@ -2744,7 +2770,7 @@ function renderExport() {
       '<button id="clear-btn" onclick="doClear()" style="width:100%;padding:12px;background:#0d0d0d;color:#868686;border:1px solid #1c1c1c;border-radius:8px;font-size:14px;font-weight:600;cursor:default;min-height:44px">Borrar todo</button>'+
     '</div>'+
 
-    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.4 · contraste AA + áreas táctiles de 44px</div>'+
+    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.5 · contraste AA, áreas táctiles de 44px, copiar token</div>'+
 
     '</div></div>';
 }
