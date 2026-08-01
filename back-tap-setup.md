@@ -175,6 +175,13 @@ Search for **"Format Date"**.
 - Date Format: **Custom**
 - Custom Format String: `yyyyMMdd-HHmmssSSS`
 
+> **Set the format on the action, not on the token.** Tapping the *Current
+> Date* token opens its own sheet that also has a Date Format field. Setting a
+> format *there* turns the date into plain text, and this action then fails —
+> or, if that field is left blank, it silently produces an empty filename and
+> the spend vanishes with no error. This one has bitten before: leave the
+> token bare and use the action's own `›` chevron.
+
 ### 13 — Get Contents of URL
 
 **URL** — type this, then insert the token from step 12 immediately before
@@ -228,7 +235,7 @@ Notes:
 
 ## The traps
 
-The five that came up building the Apple Pay shortcut, plus one specific to
+The ones that came up building the Apple Pay shortcut, plus two specific to
 this one. If something doesn't work, check here **before** changing anything
 else:
 
@@ -240,6 +247,7 @@ else:
 | 4 | `422 content, message weren't supplied` | You used the Request Body JSON field builder | Request Body = **File**, pointing at the Text from step 11 |
 | 5 | The spend never shows up | You wrapped a token in braces, so the file was named `tap-{...}.json` | In the URL the token goes **on its own**, no `{ }` and no `[ ]` |
 | 6 | It logs, but on the wrong card | A method name in step 3 doesn't match the tracker | Copy the labels exactly from **Ajustes → payment methods** |
+| 7 | Nothing happens, no error at all | A Custom date format was set on the *Current Date token* rather than on the Format Date action, so the filename came out empty | Clear the token, re-insert a bare **Current Date**, set Custom only on the action |
 
 ---
 
