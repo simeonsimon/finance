@@ -327,6 +327,7 @@ var state = {
   goalAction: null,    // {goalId, mode:'add'|'take', pay}
   goalEdit: null,
   goalDeleteAsk: null,
+  payIconEdit: null,   // índice del método cuyo icono se está eligiendo
   autoFile: false,     // archivar solo los pagos sin ninguna duda (opcional)
   tokenVisible: false, // el token se enseña sólo a petición, y nunca se guarda así
   adjustPay: null,     // id de método a ajustar, o '__total__' para el saldo global
@@ -2768,11 +2769,25 @@ function setCardPay(k, p) {
 
 function renderPayManager() {
   var rows = state.payments.map(function(p,i){
-    return '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;opacity:'+(p.hidden?'0.45':'1')+'">'+
-      '<span style="width:18px;text-align:center;color:#909090;flex-shrink:0">'+p.icon+'</span>'+
-      '<input class="input-field" style="flex:1;min-width:0;padding:9px 10px;font-size:13px" value="'+esc(p.label)+'" onchange="renamePayment('+i+',this.value)">'+
-      '<button class="chip chip-sm'+(p.mine?' on':'')+'" style="flex-shrink:0" onclick="togglePayMine('+i+')">Mío</button>'+
-      '<button class="chip chip-sm" style="flex-shrink:0" onclick="togglePayHidden('+i+')">'+(p.hidden?'Mostrar':'Ocultar')+'</button>'+
+    var picker = state.payIconEdit === i
+      ? '<div class="chips" style="margin:6px 0 2px">'+
+          PAY_ICONS.map(function(ic){
+            return '<button class="chip chip-sm'+(p.icon===ic?' on':'')+'" style="font-size:15px;padding:6px 10px" '+
+                   'aria-label="Icono '+ic+'" onclick="setPayIcon('+i+',\''+ic+'\')">'+ic+'</button>';
+          }).join('')+
+          '<input class="input-field" style="width:62px;flex-shrink:0;padding:6px 8px;font-size:15px;text-align:center" '+
+          'placeholder="otro" aria-label="Otro emoji" onchange="setPayIcon('+i+',this.value)">'+
+        '</div>'
+      : '';
+    return '<div style="margin-bottom:8px;opacity:'+(p.hidden?'0.45':'1')+'">'+
+      '<div style="display:flex;gap:6px;align-items:center">'+
+        '<button class="pressable" onclick="togglePayIconEdit('+i+')" aria-label="Cambiar icono de '+esc(p.label)+'" '+
+          'style="width:30px;height:30px;flex-shrink:0;background:'+(state.payIconEdit===i?'#1f1f1f':'#141414')+';border:1px solid #1f1f1f;border-radius:8px;color:#fff;font-size:14px;cursor:pointer;padding:0">'+p.icon+'</button>'+
+        '<input class="input-field" style="flex:1;min-width:0;padding:9px 10px;font-size:13px" value="'+esc(p.label)+'" onchange="renamePayment('+i+',this.value)">'+
+        '<button class="chip chip-sm'+(p.mine?' on':'')+'" style="flex-shrink:0" onclick="togglePayMine('+i+')">Mío</button>'+
+        '<button class="chip chip-sm" style="flex-shrink:0" onclick="togglePayHidden('+i+')">'+(p.hidden?'Mostrar':'Ocultar')+'</button>'+
+      '</div>'+
+      picker+
     '</div>';
   }).join('');
   return '<div class="card">'+
@@ -2798,6 +2813,20 @@ function renamePayment(i,v) {
   p.short=v.substring(0,9);
   save(); rebuildPayLookup(); render();
 }
+// Iconos sugeridos para métodos de pago. Se puede escribir otro cualquiera.
+var PAY_ICONS = ['💳','💵','🏦','📱','💰','🪙','💶','🎁','🧾','🍏','⌚','▪'];
+function togglePayIconEdit(i) {
+  state.payIconEdit = (state.payIconEdit === i) ? null : i;
+  render();
+}
+function setPayIcon(i, ic) {
+  var p = state.payments[i]; if (!p) return;
+  // Array.from respeta los emojis de 2 unidades (💳 mide 2 con .substring)
+  var first = Array.from(String(ic == null ? '' : ic).trim())[0];
+  p.icon = first || '▪';
+  state.payIconEdit = null;
+  save(); rebuildPayLookup(); render();
+}
 function togglePayMine(i) {
   var p=state.payments[i]; if(!p) return;
   p.mine=!p.mine;
@@ -2819,6 +2848,7 @@ function addPayment() {
   var v=(el?el.value:'').trim();
   if(!v){ paymgrMsg('Escribe un nombre para el método.'); return; }
   state.payments.push({ id:'pm'+uid(), label:v.substring(0,20), short:v.substring(0,9), icon:'▪', mine:true, hidden:false });
+  state.payIconEdit = state.payments.length - 1;   // pedir icono nada más crearlo
   save(); rebuildPayLookup(); render();
 }
 
@@ -2935,7 +2965,7 @@ function renderExport() {
       '<button id="clear-btn" onclick="doClear()" style="width:100%;padding:12px;background:#0d0d0d;color:#868686;border:1px solid #1c1c1c;border-radius:8px;font-size:14px;font-weight:600;cursor:default;min-height:44px">Borrar todo</button>'+
     '</div>'+
 
-    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.8 · nada del Atajo se pierde en silencio</div>'+
+    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.9 · iconos para los métodos de pago</div>'+
 
     '</div></div>';
 }
