@@ -382,6 +382,38 @@ function resolvePayment(v) {
   })[0];
   return hit ? hit.id : null;
 }
+// ── Reconocer la tarjeta de Apple Pay ──────────────────────────────────────
+// Wallet manda el nombre que la tarjeta tiene en el móvil ("Tarjeta Ahora"),
+// y algunos bancos mandan el número ("Visa ···1234"). Se guarda una clave
+// estable de las dos formas para que un cambio de mayúsculas, tildes o puntos
+// no haga que la app crea que es una tarjeta nueva.
+function cardKey(raw) {
+  var s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+  var m = s.match(/(\d{4})\D*$/);        // termina en 4 dígitos → es un número
+  return m ? 'n' + m[1] : 'k' + normLoose(s);
+}
+// Método de pago aprendido para esa tarjeta (null si no se sabe o está oculto)
+function cardPay(raw) {
+  var e = state.cardMap[cardKey(raw)];
+  var id = e && e.pay;
+  return (id && PAYMENTS[id] && !PAYMENTS[id].hidden) ? id : null;
+}
+function rememberCard(raw, payId) {
+  var k = cardKey(raw);
+  if (!k) return;
+  state.cardMap[k] = { pay: payId || null, name: String(raw).substring(0,30) };
+  lsSet('ft_cardmap', state.cardMap);
+}
+// Primera vez que se ve una tarjeta: se apunta sin asignar, para que aparezca
+// en Ajustes y se pueda emparejar sin esperar a confirmar un pago.
+function noteCardSeen(raw) {
+  var k = cardKey(raw);
+  if (!k || state.cardMap[k]) return;
+  state.cardMap[k] = { pay: null, name: String(raw).substring(0,30) };
+  lsSet('ft_cardmap', state.cardMap);
+}
+
 function resolveCategory(v, type) {
   var list = type === 'income' ? INC_CATS : EXP_CATS;
   var s = String(v == null ? '' : v).trim();
@@ -411,8 +443,20 @@ function load() {
   state.catBudgets = (cb && typeof cb === 'object' && !Array.isArray(cb)) ? cb : {};
   state.ghToken = String(lsGet('ft_ghtoken','') || '');
   state.ghRepo  = String(lsGet('ft_ghrepo','simeonsimon/finance-inbox') || '');
+  // cardMap pasó de {nombreTarjeta: metodoId} a {clave: {pay, name}} — se
+  // migra al vuelo para no perder lo ya aprendido
   var cmap = lsGet('ft_cardmap', {});
-  state.cardMap = (cmap && typeof cmap === 'object' && !Array.isArray(cmap)) ? cmap : {};
+  state.cardMap = {};
+  if (cmap && typeof cmap === 'object' && !Array.isArray(cmap)) {
+    Object.keys(cmap).forEach(function(k){
+      var v = cmap[k];
+      if (typeof v === 'string')      state.cardMap[cardKey(k)] = { pay: v, name: k };
+      else if (v && typeof v === 'object') {
+        var nm = v.name || k;
+        state.cardMap[cardKey(nm)] = { pay: v.pay || null, name: String(nm).substring(0,30) };
+      }
+    });
+  }
   state.balMode = lsGet('ft_balmode', 'mine');
   state.goals   = lsGet('ft_goals', []);
   var pays = lsGet('ft_payments', null);
@@ -821,6 +865,13 @@ async function fetchPending(force) {
           await deletePending(files[i].name, files[i].sha);
           continue;
         }
+        // Ejecutar el Atajo a mano desde el editor manda todo vacío (no hay
+        // transacción que lo rellene). Eso no es un pago: fuera, sin molestar.
+        if (!String(obj.merchant||obj.name||'').trim() && !parseAmountLenient(obj.amount)) {
+          await deletePending(files[i].name, files[i].sha);
+          continue;
+        }
+        noteCardSeen(obj.card);
         items.push({
           name: files[i].name, sha: files[i].sha,
           merchant: String(obj.merchant||obj.name||'Compra').substring(0,60),
@@ -853,8 +904,7 @@ function confirmPending(name) {
   if (!it) return;
   state.pendingConfirm = { name: it.name, sha: it.sha, card: it.card };
   state.pendingAsk = null;
-  var payGuess = (it.card && state.cardMap[it.card] && PAYMENTS[state.cardMap[it.card]] && !PAYMENTS[state.cardMap[it.card]].hidden)
-    ? state.cardMap[it.card] : defaultPay();
+  var payGuess = cardPay(it.card) || defaultPay();
   openAddModal({
     amount: it.amount > 0 ? it.amount.toFixed(2).replace('.',',') : '',
     description: cleanMerchant(it.merchant),
@@ -1443,7 +1493,7 @@ async function submitEntry() {
   if (state.pendingConfirm) {
     var pc = state.pendingConfirm;
     state.pendingConfirm = null;
-    if (pc.card) { state.cardMap[pc.card] = state.modalPayment; lsSet('ft_cardmap', state.cardMap); }
+    if (pc.card) rememberCard(pc.card, state.modalPayment);
     deletePending(pc.name, pc.sha);
   }
 
@@ -2603,6 +2653,44 @@ async function doAnalysis() {
 }
 
 // ── Ajustes / Export ───────────────────────────────────────────────────────
+// Cada tarjeta de Wallet ↔ uno de tus métodos de pago. La app lo aprende sola
+// la primera vez que confirmas un pago, pero aquí se ve y se puede corregir.
+function cardMapHtml() {
+  var keys = Object.keys(state.cardMap);
+  var head = '<div class="section-label" style="margin:16px 0 8px">Tarjetas de Apple Pay</div>';
+  if (!keys.length) {
+    return head + '<div style="font-size:11.5px;color:#868686;line-height:1.55">'+
+      'Todavía no ha llegado ningún pago. Cuando llegue el primero de cada tarjeta '+
+      'aparecerá aquí y podrás decir a qué método corresponde — luego ya se reconoce sola.</div>';
+  }
+  var unset = keys.filter(function(k){ return !state.cardMap[k].pay; }).length;
+  var rows = keys.map(function(k){
+    var e = state.cardMap[k];
+    var chips = PAY_IDS.map(function(p){
+      var pi = payInfo(p);
+      return '<button class="chip chip-sm'+(e.pay===p?' on':'')+'" onclick="setCardPay(\''+esc(k)+'\',\''+esc(p)+'\')">'+pi.icon+' '+esc(pi.short)+'</button>';
+    }).join('');
+    return '<div style="padding:10px 0;border-top:1px solid #131313">'+
+      '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px">'+
+        '<div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.name)+'</div>'+
+        '<div style="font-size:10px;color:'+(e.pay?'#868686':'#c4c4c4')+';flex-shrink:0">'+(e.pay?'→ '+esc(payInfo(e.pay).short):'sin asignar')+'</div>'+
+      '</div>'+
+      '<div class="chips">'+chips+'</div>'+
+      '</div>';
+  }).join('');
+  return head +
+    '<div style="font-size:11.5px;color:#868686;line-height:1.55;margin-bottom:4px">'+
+      (unset ? 'Elige a qué método corresponde cada tarjeta y los próximos pagos ya vendrán marcados.'
+             : 'Los pagos de estas tarjetas ya se reconocen solos.')+'</div>'+
+    rows;
+}
+function setCardPay(k, p) {
+  if (!state.cardMap[k]) return;
+  state.cardMap[k].pay = p;
+  lsSet('ft_cardmap', state.cardMap);
+  render();
+}
+
 function renderPayManager() {
   var rows = state.payments.map(function(p,i){
     return '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;opacity:'+(p.hidden?'0.45':'1')+'">'+
@@ -2704,6 +2792,7 @@ function renderExport() {
                          '<button class="chip chip-sm" onclick="toggleTokenVisible()">'+(state.tokenVisible?'Ocultar':'Ver')+'</button>' : '')+
       '</div>'+
       '<div id="gh-status" style="font-size:11px;color:#909090;min-height:14px;margin-top:8px">'+(state.ghToken?'✓ Token guardado localmente':'')+'</div>'+
+      cardMapHtml()+
     '</div>'+
 
     // Budget
@@ -2770,7 +2859,7 @@ function renderExport() {
       '<button id="clear-btn" onclick="doClear()" style="width:100%;padding:12px;background:#0d0d0d;color:#868686;border:1px solid #1c1c1c;border-radius:8px;font-size:14px;font-weight:600;cursor:default;min-height:44px">Borrar todo</button>'+
     '</div>'+
 
-    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.5 · contraste AA, áreas táctiles de 44px, copiar token</div>'+
+    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.6 · reconocimiento de tarjetas de Apple Pay</div>'+
 
     '</div></div>';
 }
@@ -2882,7 +2971,14 @@ function doRestore() {
     }
     if (!Array.isArray(data) && data.cardMap && typeof data.cardMap==='object' && !Array.isArray(data.cardMap)) {
       state.cardMap={};
-      Object.keys(data.cardMap).forEach(function(k){ state.cardMap[String(k)]=String(data.cardMap[k]); });
+      Object.keys(data.cardMap).forEach(function(k){
+        var v=data.cardMap[k];
+        if (typeof v==='string') state.cardMap[cardKey(k)]={pay:String(v),name:String(k).substring(0,30)};
+        else if (v && typeof v==='object') {
+          var nm=String(v.name||k).substring(0,30);
+          state.cardMap[cardKey(nm)]={pay:v.pay?String(v.pay):null,name:nm};
+        }
+      });
     }
     if (!Array.isArray(data) && typeof data.ghRepo==='string' && data.ghRepo.indexOf('/')>0) state.ghRepo=data.ghRepo;
     var clean=ents.filter(function(e){ return e && e.description && e.amount>0 && e.date; })
