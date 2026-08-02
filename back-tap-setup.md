@@ -140,35 +140,39 @@ tap. Anything the app doesn't recognise becomes *Otros*.
 
 ### 9 — Text  ← the movement itself
 
-> **Do this in two passes.** Type the skeleton first, then drop the variables
-> into it. Don't try to type it all in one go — whatever you type stays as
-> plain text, and the shortcut will happily upload the words instead of your
-> numbers.
+> **Build it left to right, never by going back to fill gaps.** Type a piece,
+> insert a variable, type the next piece. Placing a cursor exactly between two
+> quote marks on a phone is fiddly, and landing one character off is the most
+> common way this breaks.
 
-**Pass 1 — type exactly this, empty quotes and all:**
+Work through these **seven steps in order**, without moving the cursor
+backwards at any point:
 
-```
-{"amount":"","payment":"","category":"","auto":true}
-```
-
-One single line, no line breaks. The braces and quote marks are all typed —
-they're part of the JSON.
-
-**Pass 2 — put the cursor between each empty pair of quotes and insert the
-variable** from the variable bar above the keyboard:
-
-| Between the quotes after | insert the variable |
+| # | Do this |
 |---|---|
-| `"amount":` | `importe` |
-| `"payment":` | `metodo` |
-| `"category":` | `categoria` |
+| 1 | Type `{"amount":"` |
+| 2 | Insert the variable `importe` |
+| 3 | Type `","payment":"` |
+| 4 | Insert the variable `metodo` |
+| 5 | Type `","category":"` |
+| 6 | Insert the variable `categoria` |
+| 7 | Type `","auto":true}` |
 
-Leave `"auto":true` exactly as it is — no variable there.
+**The rule that tells you it's right:** every variable chip must have a quote
+mark `"` **immediately to its left and immediately to its right**. Read along
+the line — chip, quote, comma, quote, name, quote, colon, quote, chip. If a
+chip touches a `:` or a `,` on either side, it's in the wrong place.
 
-**How to tell it worked:** each inserted variable shows as a *rounded
-highlighted chip*, visually different from the text around it. If you can see
-the words `importe`, `metodo` or `categoria` as ordinary text, they're not
-variables — delete them and insert properly from the variable bar.
+```
+correct    …"amount":"〔importe〕","payment":"…
+                     ↑         ↑
+                     quote before and after the chip
+
+wrong      …"amount":〔importe〕"","payment"〔metodo〕:"…
+```
+
+It must all be one single line, and the words `importe`, `metodo`,
+`categoria` must never appear as ordinary text — only as chips.
 
 ### 10 — Base64 Encode
 Search for **"Base64 Encode"**. Make sure it says *Encode*, not *Decode*.
@@ -179,17 +183,15 @@ This is not optional — see [trap 1](#the-traps).
 
 ### 11 — Text  ← the request body
 
-A second **Text** action. Same two passes.
+A second **Text** action. Same left-to-right method:
 
-**Pass 1 — type this:**
+| # | Do this |
+|---|---|
+| 1 | Type `{"message":"tap","content":"` |
+| 2 | Insert the **Base64 Encoded** variable (step 10's output) |
+| 3 | Type `"}` |
 
-```
-{"message":"tap","content":""}
-```
-
-**Pass 2 —** put the cursor between the last pair of quotes and insert the
-**Base64 Encoded** variable (the output of step 10). Again: it should appear
-as a highlighted chip, not as words.
+Same rule: a quote immediately before and after the chip.
 
 ### 12 — Format Date
 Search for **"Format Date"**.
@@ -207,17 +209,15 @@ Search for **"Format Date"**.
 
 ### 13 — Get Contents of URL
 
-**URL** — same two passes.
+**URL** — same left-to-right method:
 
-**Pass 1 — type this exactly:**
+| # | Do this |
+|---|---|
+| 1 | Type `https://api.github.com/repos/simeonsimon/finance-inbox/contents/pending/tap-` |
+| 2 | Insert the **Formatted Date** variable (step 12's output) |
+| 3 | Type `.json` |
 
-```
-https://api.github.com/repos/simeonsimon/finance-inbox/contents/pending/tap-.json
-```
-
-**Pass 2 —** put the cursor between `tap-` and `.json` and insert the
-**Formatted Date** variable from step 12. Nothing wrapped around it — no
-brackets, no braces.
+Nothing wrapped around the chip — no brackets, no braces.
 
 Tap **"Show More"** and fill in:
 

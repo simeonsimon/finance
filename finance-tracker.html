@@ -857,8 +857,19 @@ async function fetchPending(force) {
         var fr = await ghApi('/contents/pending/'+encodeURIComponent(files[i].name));
         if (!fr.ok) continue;
         var fd = await fr.json();
-        var obj = {};
-        try { obj = JSON.parse(b64DecodeUtf8(fd.content||'')) || {}; } catch(e) {}
+        var obj = {}, raw = b64DecodeUtf8(fd.content||''), parseOk = true;
+        try { obj = JSON.parse(raw) || {}; } catch(e) { parseOk = false; }
+        // JSON roto: casi siempre el Atajo mal montado. No es un pago vacío,
+        // así que NO se borra — se enseña con lo que llegó para poder verlo.
+        if (!parseOk) {
+          items.push({
+            name: files[i].name, sha: files[i].sha,
+            merchant: 'Mensaje ilegible del Atajo', amount: 0, card: '',
+            date: parsePendingDate(obj.ts||obj.date),
+            bad: 'Esto no es un JSON válido. Llegó: '+String(raw).replace(/\s+/g,' ').substring(0,90)
+          });
+          continue;
+        }
         // Registro automático: ya viene todo decidido, se apunta y se borra
         if (isAutoFlag(obj.auto)) {
           if (done.indexOf(files[i].name) !== -1) {   // ya procesado, sólo faltaba borrarlo
@@ -2924,7 +2935,7 @@ function renderExport() {
       '<button id="clear-btn" onclick="doClear()" style="width:100%;padding:12px;background:#0d0d0d;color:#868686;border:1px solid #1c1c1c;border-radius:8px;font-size:14px;font-weight:600;cursor:default;min-height:44px">Borrar todo</button>'+
     '</div>'+
 
-    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.7 · archivado automático + avisos de Atajo mal configurado</div>'+
+    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.8 · nada del Atajo se pierde en silencio</div>'+
 
     '</div></div>';
 }
