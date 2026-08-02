@@ -140,16 +140,35 @@ tap. Anything the app doesn't recognise becomes *Otros*.
 
 ### 9 — Text  ← the movement itself
 
-Type this line. Where it says **[insert X]**, don't type brackets or the word:
-insert the variable from the keyboard's variable bar, on its own, with nothing
-wrapped around it.
+> **Do this in two passes.** Type the skeleton first, then drop the variables
+> into it. Don't try to type it all in one go — whatever you type stays as
+> plain text, and the shortcut will happily upload the words instead of your
+> numbers.
+
+**Pass 1 — type exactly this, empty quotes and all:**
 
 ```
-{"amount":"[insert importe]","payment":"[insert metodo]","category":"[insert categoria]","auto":true}
+{"amount":"","payment":"","category":"","auto":true}
 ```
 
-The braces `{ }` and the quote marks `"` **are** typed — they're part of the
-JSON. It must end up as one single line with no line breaks.
+One single line, no line breaks. The braces and quote marks are all typed —
+they're part of the JSON.
+
+**Pass 2 — put the cursor between each empty pair of quotes and insert the
+variable** from the variable bar above the keyboard:
+
+| Between the quotes after | insert the variable |
+|---|---|
+| `"amount":` | `importe` |
+| `"payment":` | `metodo` |
+| `"category":` | `categoria` |
+
+Leave `"auto":true` exactly as it is — no variable there.
+
+**How to tell it worked:** each inserted variable shows as a *rounded
+highlighted chip*, visually different from the text around it. If you can see
+the words `importe`, `metodo` or `categoria` as ordinary text, they're not
+variables — delete them and insert properly from the variable bar.
 
 ### 10 — Base64 Encode
 Search for **"Base64 Encode"**. Make sure it says *Encode*, not *Decode*.
@@ -160,13 +179,17 @@ This is not optional — see [trap 1](#the-traps).
 
 ### 11 — Text  ← the request body
 
-A second **Text** action:
+A second **Text** action. Same two passes.
+
+**Pass 1 — type this:**
 
 ```
-{"message":"tap","content":"[insert the output of step 10]"}
+{"message":"tap","content":""}
 ```
 
-Again: braces and quotes are typed, the token is inserted on its own.
+**Pass 2 —** put the cursor between the last pair of quotes and insert the
+**Base64 Encoded** variable (the output of step 10). Again: it should appear
+as a highlighted chip, not as words.
 
 ### 12 — Format Date
 Search for **"Format Date"**.
@@ -184,12 +207,17 @@ Search for **"Format Date"**.
 
 ### 13 — Get Contents of URL
 
-**URL** — type this, then insert the token from step 12 immediately before
-`.json`, with no brackets or braces around it:
+**URL** — same two passes.
+
+**Pass 1 — type this exactly:**
 
 ```
-https://api.github.com/repos/simeonsimon/finance-inbox/contents/pending/tap-[insert step 12].json
+https://api.github.com/repos/simeonsimon/finance-inbox/contents/pending/tap-.json
 ```
+
+**Pass 2 —** put the cursor between `tap-` and `.json` and insert the
+**Formatted Date** variable from step 12. Nothing wrapped around it — no
+brackets, no braces.
 
 Tap **"Show More"** and fill in:
 
@@ -248,6 +276,7 @@ else:
 | 5 | The spend never shows up | You wrapped a token in braces, so the file was named `tap-{...}.json` | In the URL the token goes **on its own**, no `{ }` and no `[ ]` |
 | 6 | It logs, but on the wrong card | A method name in step 3 doesn't match the tracker | Copy the labels exactly from **Ajustes → payment methods** |
 | 7 | Nothing happens, no error at all | A Custom date format was set on the *Current Date token* rather than on the Format Date action, so the filename came out empty | Clear the token, re-insert a bare **Current Date**, set Custom only on the action |
+| 8 | Shortcut says `✓ Apuntado`, GitHub shows the file, but nothing reaches the tracker | The variables in step 9 were typed as **words** instead of inserted as variables, so the upload contained the placeholder text rather than your amount | Open step 9. If you can read `importe` / `metodo` / `categoria` as ordinary text, delete them and re-insert from the variable bar — they must look like highlighted chips |
 
 ---
 

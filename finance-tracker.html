@@ -327,6 +327,7 @@ var state = {
   goalAction: null,    // {goalId, mode:'add'|'take', pay}
   goalEdit: null,
   goalDeleteAsk: null,
+  autoFile: false,     // archivar solo los pagos sin ninguna duda (opcional)
   tokenVisible: false, // el token se enseña sólo a petición, y nunca se guarda así
   adjustPay: null,     // id de método a ajustar, o '__total__' para el saldo global
   adjustOn: null,      // al ajustar el total: método donde se apunta la diferencia
@@ -457,6 +458,7 @@ function load() {
       }
     });
   }
+  state.autoFile = !!lsGet('ft_autofile', false);
   state.balMode = lsGet('ft_balmode', 'mine');
   state.goals   = lsGet('ft_goals', []);
   var pays = lsGet('ft_payments', null);
@@ -483,6 +485,7 @@ function save() {
   lsSet('ft_ghtoken',  state.ghToken);
   lsSet('ft_ghrepo',   state.ghRepo);
   lsSet('ft_cardmap',  state.cardMap);
+  lsSet('ft_autofile', state.autoFile);
   lsSet('ft_balmode',  state.balMode);
   lsSet('ft_goals',    state.goals);
   lsSet('ft_payments', state.payments);
@@ -858,11 +861,26 @@ async function fetchPending(force) {
         try { obj = JSON.parse(b64DecodeUtf8(fd.content||'')) || {}; } catch(e) {}
         // Registro automático: ya viene todo decidido, se apunta y se borra
         if (isAutoFlag(obj.auto)) {
-          if (done.indexOf(files[i].name) === -1) {
-            var ent = buildAutoEntry(obj);
-            if (ent) { state.entries.unshift(ent); added++; markAutoDone(files[i].name); }
+          if (done.indexOf(files[i].name) !== -1) {   // ya procesado, sólo faltaba borrarlo
+            await deletePending(files[i].name, files[i].sha);
+            continue;
           }
-          await deletePending(files[i].name, files[i].sha);
+          var ent = buildAutoEntry(obj);
+          if (ent) {
+            state.entries.unshift(ent); added++; markAutoDone(files[i].name);
+            await deletePending(files[i].name, files[i].sha);
+            continue;
+          }
+          // No se ha podido leer (lo típico: el Atajo mandó el texto del hueco
+          // en vez del valor). NUNCA borrarlo en silencio: pasa a la cola para
+          // que se vea qué llegó y por qué no valía.
+          items.push({
+            name: files[i].name, sha: files[i].sha,
+            merchant: 'Registro rápido no válido',
+            amount: parseAmountLenient(obj.amount),
+            card: '', date: parsePendingDate(obj.ts||obj.date),
+            bad: 'El Atajo mandó «'+String(obj.amount==null?'':obj.amount).substring(0,28)+'» como importe, y eso no es un número. Revisa el paso del Texto en el Atajo.'
+          });
           continue;
         }
         // Ejecutar el Atajo a mano desde el editor manda todo vacío (no hay
@@ -872,6 +890,28 @@ async function fetchPending(force) {
           continue;
         }
         noteCardSeen(obj.card);
+
+        // Archivado automático (opcional). Sólo cuando no hay NADA que
+        // adivinar: tarjeta ya emparejada y comercio que la app clasifica
+        // sola. Si hiciera falta preguntar a la IA, o la tarjeta es nueva,
+        // se queda en la cola para revisarlo a mano.
+        if (state.autoFile && done.indexOf(files[i].name) === -1) {
+          var amtA = parseAmountLenient(obj.amount);
+          var merchA = String(obj.merchant||obj.name||'').trim();
+          var payA = cardPay(obj.card);
+          var catA = merchA ? localCatLookup(merchA) : null;
+          if (amtA > 0 && payA && catA) {
+            state.entries.unshift({
+              id: uid(), type: 'expense', amount: amtA,
+              description: cleanMerchant(merchA), category: catA,
+              payment: payA, date: parsePendingDate(obj.ts||obj.date)
+            });
+            added++; markAutoDone(files[i].name);
+            await deletePending(files[i].name, files[i].sha);
+            continue;
+          }
+        }
+
         items.push({
           name: files[i].name, sha: files[i].sha,
           merchant: String(obj.merchant||obj.name||'Compra').substring(0,60),
@@ -1796,6 +1836,7 @@ function renderDashboard() {
           '<div style="min-width:0;padding-right:10px">'+
             '<div style="font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(cleanMerchant(p.merchant))+'</div>'+
             '<div style="font-size:11px;color:#868686;margin-top:2px">'+fmtDate(p.date)+(p.card?' · '+esc(p.card):'')+(sugg?' · '+esc(catShort(sugg))+' ✓':'')+'</div>'+
+            (p.bad?'<div style="font-size:11px;color:#c4c4c4;margin-top:5px;line-height:1.45">⚠ '+esc(p.bad)+'</div>':'')+
           '</div>'+
           '<div style="font-size:15px;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums">'+fmtEur(p.amount)+'</div>'+
         '</div>'+
@@ -2684,6 +2725,29 @@ function cardMapHtml() {
              : 'Los pagos de estas tarjetas ya se reconocen solos.')+'</div>'+
     rows;
 }
+// Archivado automático. La condición es deliberadamente estricta: si hubiera
+// que adivinar cualquier cosa, el pago espera en la cola.
+function autoFileHtml() {
+  var on = state.autoFile;
+  var mapped = Object.keys(state.cardMap).filter(function(k){ return state.cardMap[k].pay; }).length;
+  return '<div style="margin-top:16px;border-top:1px solid #131313;padding-top:14px">'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px">'+
+      '<div style="font-size:13px;font-weight:700">Archivar solos los pagos claros</div>'+
+      '<button class="chip chip-sm'+(on?' on':'')+'" onclick="toggleAutoFile()" aria-pressed="'+(on?'true':'false')+'">'+(on?'Activado':'Desactivado')+'</button>'+
+    '</div>'+
+    '<div style="font-size:11.5px;color:#868686;line-height:1.55">'+
+      'Un pago entra solo en el balance <b style="color:#c4c4c4">únicamente</b> si la tarjeta ya está emparejada '+
+      '<b style="color:#c4c4c4">y</b> el comercio es uno que la app reconoce sola. Si hay cualquier duda '+
+      '—tarjeta nueva, comercio desconocido— espera en «Por confirmar» como hasta ahora.'+
+      (on && !mapped ? '<br><b style="color:#c4c4c4">Ahora mismo no hay ninguna tarjeta emparejada, así que no se archivará nada.</b>' : '')+
+    '</div></div>';
+}
+function toggleAutoFile() {
+  state.autoFile = !state.autoFile;
+  lsSet('ft_autofile', state.autoFile);
+  render();
+}
+
 function setCardPay(k, p) {
   if (!state.cardMap[k]) return;
   state.cardMap[k].pay = p;
@@ -2793,6 +2857,7 @@ function renderExport() {
       '</div>'+
       '<div id="gh-status" style="font-size:11px;color:#909090;min-height:14px;margin-top:8px">'+(state.ghToken?'✓ Token guardado localmente':'')+'</div>'+
       cardMapHtml()+
+      autoFileHtml()+
     '</div>'+
 
     // Budget
@@ -2859,7 +2924,7 @@ function renderExport() {
       '<button id="clear-btn" onclick="doClear()" style="width:100%;padding:12px;background:#0d0d0d;color:#868686;border:1px solid #1c1c1c;border-radius:8px;font-size:14px;font-weight:600;cursor:default;min-height:44px">Borrar todo</button>'+
     '</div>'+
 
-    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.6 · reconocimiento de tarjetas de Apple Pay</div>'+
+    '<div style="text-align:center;font-size:11px;color:#868686;margin-top:6px">v3.7 · archivado automático + avisos de Atajo mal configurado</div>'+
 
     '</div></div>';
 }
