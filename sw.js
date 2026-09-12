@@ -1,4 +1,8 @@
-const CACHE_VERSION = 'finance-v2';
+// Cache Storage is scoped to the ORIGIN, not to this app's path, and
+// simeonsimon.github.io also hosts 60-reps and anki-on-iphone. Only ever
+// touch caches carrying this prefix — never the whole key list.
+const CACHE_PREFIX = 'finance-';
+const CACHE_VERSION = CACHE_PREFIX + 'v3';
 const PRECACHE = [
   './',
   './index.html',
@@ -21,7 +25,7 @@ self.addEventListener('install', function(event) {
 self.addEventListener('activate', function(event) {
   event.waitUntil(caches.keys().then(function(keys) {
     return Promise.all(keys.filter(function(key) {
-      return key !== CACHE_VERSION;
+      return key.indexOf(CACHE_PREFIX) === 0 && key !== CACHE_VERSION;
     }).map(function(key) {
       return caches.delete(key);
     }));
